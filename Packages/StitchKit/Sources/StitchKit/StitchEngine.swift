@@ -209,7 +209,8 @@ public actor StitchEngine {
         if let raw = sc_features_keypoints(pointer) {
             keypoints = (0..<count).map { index in
                 let k = raw[index]
-                return Keypoint(x: k.x * inverse.x, y: k.y * inverse.y, size: k.size * inverseSize, angle: k.angle,
+                return Keypoint(x: siftToOriginal(k.x, inverse.x), y: siftToOriginal(k.y, inverse.y),
+                                size: k.size * inverseSize, angle: k.angle,
                                 response: k.response)
             }
         }
@@ -244,8 +245,8 @@ public actor StitchEngine {
             let m = raw[index]
             guard let ka = keypointsA?[Int(m.index_a)], let kb = keypointsB?[Int(m.index_b)] else { continue }
             matches.append(TentativeMatch(
-                a: Point2(x: ka.x * inverseA.x, y: ka.y * inverseA.y),
-                b: Point2(x: kb.x * inverseB.x, y: kb.y * inverseB.y),
+                a: Point2(x: siftToOriginal(ka.x, inverseA.x), y: siftToOriginal(ka.y, inverseA.y)),
+                b: Point2(x: siftToOriginal(kb.x, inverseB.x), y: siftToOriginal(kb.y, inverseB.y)),
                 score: m.score
             ))
         }
@@ -291,7 +292,8 @@ public actor StitchEngine {
         var features: ImageFeatures {
             let inverse = SIMD2<Float>(1 / scale)
             let points = (0..<count).filter(isContent).map { index in
-                Keypoint(x: keypoints[2 * index] * inverse.x, y: keypoints[2 * index + 1] * inverse.y, size: 0,
+                Keypoint(x: learnedToOriginal(keypoints[2 * index], inverse.x),
+                         y: learnedToOriginal(keypoints[2 * index + 1], inverse.y), size: 0,
                          angle: 0, response: 0)
             }
             return ImageFeatures(imageID: image.id, source: .racoLightGlue, workingSize: content, keypoints: points,
@@ -445,8 +447,10 @@ public actor StitchEngine {
             let other = Int(partner[index])
             guard other >= 0, other < count, a.isContent(index), b.isContent(other) else { continue }
             matches.append(TentativeMatch(
-                a: Point2(x: a.keypoints[2 * index] * inverseA.x, y: a.keypoints[2 * index + 1] * inverseA.y),
-                b: Point2(x: b.keypoints[2 * other] * inverseB.x, y: b.keypoints[2 * other + 1] * inverseB.y),
+                a: Point2(x: learnedToOriginal(a.keypoints[2 * index], inverseA.x),
+                          y: learnedToOriginal(a.keypoints[2 * index + 1], inverseA.y)),
+                b: Point2(x: learnedToOriginal(b.keypoints[2 * other], inverseB.x),
+                          y: learnedToOriginal(b.keypoints[2 * other + 1], inverseB.y)),
                 score: confidence[index]
             ))
         }
@@ -550,6 +554,13 @@ public actor StitchEngine {
         return pairs
     }
 }
+
+/// Original-pixel coordinates follow OpenCV: pixel centres at integers. SIFT works in the same convention
+/// on the downscaled image, so a point maps through the pixel centres.
+func siftToOriginal(_ value: Float, _ inverseScale: Float) -> Float { (value + 0.5) * inverseScale - 0.5 }
+
+/// RaCo-ALIKED keypoints are in edge coordinates (pixel i spans [i, i + 1)), as LightGlue expects.
+func learnedToOriginal(_ value: Float, _ inverseScale: Float) -> Float { value * inverseScale - 0.5 }
 
 /// Reads a NUL-terminated message written by the C layer.
 func errorText(_ buffer: [CChar]) -> String {
