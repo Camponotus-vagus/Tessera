@@ -11,7 +11,7 @@ Tessera uses the following software and models. Their licenses apply to the corr
 | [ALIKED](https://github.com/Shiaoming/ALIKED) | descriptor network weights | BSD-3-Clause |
 | [LightGlue](https://github.com/cvg/LightGlue) (ETH Zurich, Computer Vision and Geometry group) | matcher architecture and weights for RaCo-ALIKED | Apache-2.0 |
 | [LightGlue-ONNX](https://github.com/fabio-sim/LightGlue-ONNX) | export-friendly model code used by `tools/export` | Apache-2.0 |
-| Apple Core ML, Accelerate, Metal | on-device inference and linear algebra | system frameworks |
+| Apple Core ML, Accelerate | on-device inference (on the GPU through Core ML) and linear algebra | system frameworks |
 
 The models that Tessera downloads (`tessera-models-*.zip` in the releases) are converted from the RaCo, ALIKED and LightGlue weights with the scripts in `tools/export`. The conversion splits the networks and rewrites a few layers as equivalent matrix products; it does not retrain the weights. [Licenses/models.md](Licenses/models.md) lists which file comes from which weights; the archive contains it as `LICENSES.md`, with the Apache License 2.0.
 

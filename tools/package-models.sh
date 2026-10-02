@@ -32,3 +32,5 @@ json.dump({"version": 2, "release": version, "archive": f"tessera-{version}.zip"
 PY
 echo "$archive"
 echo "sha256 $digest, $size bytes"
+# A model release must not become the latest one: the README links the app download to releases/latest.
+echo "publish with: gh release create $version $archive --latest=false"

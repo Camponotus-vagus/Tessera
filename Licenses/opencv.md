@@ -1,6 +1,6 @@
 # OpenCV
 
-The Tessera app contains parts of [OpenCV](https://opencv.org) 5.0.0, linked statically: the core, imgproc, features, flann, geometry and stitching modules, built by `tools/build-opencv.sh` without changes to the source. OpenCV is licensed under the Apache License 2.0, whose text is in `Apache-2.0.txt`. The other files in the `opencv` folder are the licenses of third-party code inside these modules, as installed by OpenCV's build.
+The Tessera app contains parts of [OpenCV](https://opencv.org) 5.0.0, linked statically: the core, imgproc, features, flann, geometry and stitching modules, built by `tools/build-opencv.sh` without changes to the source. OpenCV is licensed under the Apache License 2.0, whose text is in `Apache-2.0.txt`. In the app, the files in the `opencv` folder next to this file are the licenses of third-party code inside these modules, as installed by OpenCV's build.
 
 ```
 Copyright (C) 2000-2022, Intel Corporation, all rights reserved.
@@ -20,12 +20,12 @@ Third party copyrights are property of their respective owners.
 
 ## Carotene
 
-The ARM NEON routines of OpenCV's Carotene HAL are included under this license:
+The ARM NEON routines of OpenCV's Carotene HAL (`hal/carotene`) are included under the 3-clause BSD license of their source files:
 
 ```
-License Agreement For libcarotene (3-clause BSD License)
+License Agreement For Open Source Computer Vision Library (3-clause BSD License)
 
-Copyright (C) 2014-2015, NVIDIA Corporation, all rights reserved.
+Copyright (C) 2012-2016, NVIDIA Corporation, all rights reserved.
 Third party copyrights are property of their respective owners.
 
 Redistribution and use in source and binary forms, with or without modification,

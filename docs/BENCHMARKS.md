@@ -16,13 +16,13 @@ Measured on a MacBook Air M5 (32 GB, macOS 27), release build of `stitchbench`. 
 | Drawer, RootSIFT + LightGlue, candidate pairs | 9 of 15 | 0.9 s |
 | Drawer, LightGlue only, all pairs | 15 | 0.9 s |
 | Grid, RootSIFT + LightGlue, candidate pairs | 31 of 276 | 2.9 s |
-| Grid, RootSIFT + LightGlue, all pairs | 276 | 13.7 s (before the latest extractor changes) |
+| Grid, RootSIFT + LightGlue, all pairs | 276 | 13.7 s (measured before the three-photo pipeline and the C++ descriptor head) |
 
-All photos end up in one group in every case. On the drawer the verified pairs are exactly the five consecutive shots; a false link between two rows of identical labels is rejected by the plausibility and coverage checks. With the capture order removed (files renamed in shuffled order, metadata stripped), the affinity's spanning tree alone recovers the same five pairs.
+All photos end up in one group in every case. On the drawer the verified pairs are exactly the five pairs of consecutive shots; a false link between two rows of identical labels is rejected by the plausibility and coverage checks. With the capture order removed (files renamed in shuffled order, metadata stripped), the affinity's spanning tree alone recovers the same five pairs.
 
 ## Stitching
 
-Default settings (both matchers, automatic mode and projection, full resolution, seams around objects, multi-band blending). Analysis covers features, matching and verification; stitching covers alignment, warping, exposure, seams and blending, without writing the file.
+The app's default settings, which `stitchbench` gets with `--source both`: both matchers, automatic mode and projection, full resolution, seams around objects, multi-band blending. Analysis covers features, matching and verification; stitching covers alignment, warping, exposure, seams and blending, without writing the file.
 
 | Set | Model and projection | Panorama | Alignment error | Analysis | Stitching | Peak memory |
 |---|---|---|---|---|---|---|

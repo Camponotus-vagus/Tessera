@@ -22,6 +22,6 @@ mkdir -p "$here/../../Models"
 ./.venv/bin/python split_extractor.py sparse           # sparse extractor halves (ONNX, CPU)
 ./.venv-coreml/bin/python split_extractor.py dense     # dense extractor halves (Core ML)
 ./.venv-coreml/bin/python split_extractor.py levels    # dense maps + ALIKED feature levels (Core ML, default)
-./.venv/bin/python split_extractor.py select           # keypoint selection (ONNX, default)
+./.venv/bin/python split_extractor.py select           # keypoint selection (ONNX, for comparison with select.cpp)
 ./.venv/bin/python split_extractor.py head             # descriptor head weights for the C++ head (default)
 ./.venv-coreml/bin/python convert_coreml.py --only matcher

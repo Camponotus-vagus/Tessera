@@ -16,25 +16,24 @@ Swift never sees C++ types. Everything crosses the boundary as flat float arrays
 
 ## Pipeline
 
-`StitchEngine.analyze(urls:configuration:excluded:)` returns a `MatchReport`.
+`StitchEngine.analyze(urls:configuration:excluded:progress:)` returns a `MatchReport`.
 
 ### 1. Features
 
-- **RootSIFT.** OpenCV SIFT on a downscaled gray image (1.5 MP by default, up to 6000 keypoints), descriptors L1-normalised and square-rooted. Coordinates are scaled back to the original image.
-- **RaCo-ALIKED.** Each photo is fitted, without distortion, into a fixed 1024 x 768 (or 768 x 1024) canvas. The network is split in three:
+- **RootSIFT**: OpenCV SIFT on a downscaled gray image (1.5 MP by default, up to 6000 keypoints), descriptors L1-normalised and square-rooted. Coordinates are scaled back to the original image.
+- **RaCo-ALIKED**: each photo is fitted, without distortion, into a fixed 1024 x 768 (or 768 x 1024) canvas, and up to three photos are in flight at once. The network is split in three:
   - Core ML (GPU, fp32): RaCo's score map and ranker map, and ALIKED's four feature levels at their own resolutions (1, 1/2, 1/8, 1/32).
   - C++ (`select.cpp`, CPU): non-maximum suppression, top-k, sub-pixel refinement and the boundary ranker, giving 2048 keypoints in under a millisecond. It reproduces the exported ONNX select model for 1024 to 2560 keypoints, where RaCo ranks the boundary window: on the test photos, letterboxed too, the same keypoints inside the photo within 1e-4 px, in the same order except among exactly equal logits. The ONNX model remains available for comparison in builds with ONNX Runtime.
   - C++ (`descriptor_head.cpp`): ALIKED's sparse deformable descriptor head. It rebuilds the upsampled, L2-normalised feature vector only at the 9 patch pixels and 4 x 16 deformable sample corners of each keypoint, then runs the head's layers as matrix products. Building the full-resolution 128-channel map instead would cost 400 MB per photo.
-  Up to three photos are in flight at once.
 
 ### 2. Candidate pairs
 
-With four photos or fewer, every pair is matched. Otherwise the affinity of a pair is the number of mutual nearest neighbours passing Lowe's ratio test among the best 512 descriptors of each photo (learned descriptors when available). The candidates are the union of consecutive shots (by capture time, then file name), the two most affine partners of each photo, and a maximum spanning tree of the affinity, so that no photo is left without a path to the others.
+With four photos or fewer, every pair is matched. Otherwise the affinity of a pair is the number of mutual nearest neighbours passing Lowe's ratio test among the best 512 descriptors of each photo (learned descriptors when available). The candidates are the union of consecutive shots (by capture time, then file name), the two partners with the highest affinity for each photo, and a maximum spanning tree of the affinity, so that no photo is left without a path to the others.
 
 ### 3. Matching
 
 - **RootSIFT**: exact nearest neighbours from one Accelerate matrix product per block of rows (the descriptors have unit norm, so distances follow from dot products), Lowe's ratio test at 0.8 and a mutual check.
-- **LightGlue** on Core ML (GPU, fp16 by default). Each photo's keypoints are normalised by its own long edge. The exported matcher returns, for every keypoint of the first photo, its partner and a confidence that is zero when the pair is not mutual; matches above 0.1 are kept. Consecutive shots are matched while extraction is still running.
+- **LightGlue** on Core ML (GPU, fp16 by default). Keypoints are normalised by the long edge of the fixed canvas (1024 px), around the canvas centre. The exported matcher returns, for every keypoint of the first photo, its partner and a confidence that is zero when the pair is not mutual; matches above 0.1 are kept. Consecutive shots are matched while extraction is still running.
 
 ### 4. Verification
 
@@ -71,25 +70,26 @@ Verified pairs define connected components. If more than one remains, up to thre
 
 ### 7. Global alignment
 
-`Aligner` collects, for every verified pair of the group, the inliers of each matcher that verified it, removes duplicates closer than half the inlier threshold, refits a homography to the union and keeps at most 300 matches per pair, sampled over an 8 x 8 grid so that a dense patch does not outweigh the rest of the overlap. `align.cpp` then solves one of these models over all photos at once:
+`AlignmentProblem.build` collects, for every verified pair of the group, the inliers of each matcher that verified it, removes duplicates closer than half the inlier threshold, refits a homography to the union (keeping the best matcher's inliers alone when the refit keeps fewer points than 90% of them) and keeps at most 300 matches per pair, sampled over an 8 x 8 grid so that a dense patch does not outweigh the rest of the overlap. `Aligner` and `align.cpp` then solve one of these models over all photos at once:
 
 | Model | Solver |
 |---|---|
 | translation, similarity, affine | weighted linear least squares with Huber reweighting, one photo fixed |
 | homography | Levenberg-Marquardt with an analytic Jacobian; the reference photo is the one that keeps the largest stretch of the others smallest |
-| rotation | OpenCV `HomographyBasedEstimator` for the first focal lengths and rotations, then `BundleAdjusterRay`, or `BundleAdjusterReproj` with the focal length fixed when that fails |
+| rotation | OpenCV `HomographyBasedEstimator` for the first rotations, with the focal-length prior described below, then `BundleAdjusterRay`, or `BundleAdjusterReproj` with the focal length fixed when that fails |
 
-For rotation, the focal length starts from the EXIF data when every photo has it (35 mm equivalent, f = f35 * hypot(w, h) / 43.27), else from the pairwise homographies, else from a 72-degree field of view across the long side. The ray adjuster's result is rejected when the median focal length leaves 0.67 to 1.5 times that prior or, with EXIF, the photos' focal lengths differ by more than 5%; the reprojection adjuster then refines the rotations alone. Wave correction levels the horizon when there are at least three photos spanning 30 degrees or more. Plane mode picks the simplest of translation, similarity and affine whose RMS error is within 1.25 times the best plus half a pixel, and notes when a homography would fit much better. Document mode uses the homography. Rotation mode falls back to the homography, with a note, if the photos do not fit a turning camera. Automatic mode solves all of them and prefers, in this order, translation, similarity, rotation (unless the homography explains the matches clearly better without stretching the photos more than four times), affine and homography, each when it meets the same tolerance. After solving, the pair with the largest error is dropped and the model solved again when that error is above three times the median and the inlier threshold and the group stays connected without the pair; this repeats at most twice.
+For rotation, the focal length starts from the EXIF data when every photo has it (35 mm equivalent, f = f35 * hypot(w, h) / 43.27), else from the pairwise homographies, else from a 72-degree field of view across the long side. The ray adjuster's result is rejected when, with EXIF, the photos' focal lengths differ by more than 5%, or when its median focal length leaves 0.67 to 1.5 times a prior taken from EXIF or the homographies (the 72-degree fallback is not checked). The reprojection adjuster then refines the rotations alone, and its result must pass the same test. Wave correction levels the horizon when there are at least three photos spanning 30 degrees or more.
+
+Plane mode picks the simplest of translation, similarity and affine whose RMS error is within 1.25 times the best plus half a pixel, and notes when a homography would fit much better. Document mode uses the homography. Rotation mode falls back to the homography, with a note, if the photos do not fit a turning camera. Automatic mode solves all of them and takes the first that fits: translation, then similarity, each when its RMS error is within 1.25 times the best plus half a pixel; then rotation, when its error is within that tolerance or within 1.5 times the homography's plus one pixel, or when the homography fails or stretches a photo more than four times; then affine within the tolerance; then the homography. After solving, the pair with the largest error is dropped and the model solved again when that error is above three times the median and the inlier threshold and the group stays connected without the pair; this repeats at most twice.
 
 ### 8. Compositing
 
-`Compositor` (`compositor.cpp`) reads the photos twice: small copies first, to estimate exposure and place the seams, then each photo at full resolution, warped and handed to the blender one at a time, so that only the photo in hand is held at full size.
+`Compositor` (`compositor.cpp`) reads the photos twice: small copies first, to estimate exposure and place the seams, then each photo at the output resolution (full, half or a quarter), warped and handed to the blender one at a time, so that only the photo in hand is held at that size.
 
-
-- Projection. Rotation panoramas use OpenCV's plane (rectilinear), cylindrical and spherical warpers, with the yaw recentred on the middle of the panorama. Automatic projection picks rectilinear when the horizontal and vertical fields of view are both within 100 degrees and no photo is more than 60 degrees off axis, cylindrical when only the vertical field is within 100 degrees, and spherical otherwise. Panoramas of 330 degrees or more are refused for now. Planar models are warped with `warpPerspective` onto the reference photo's plane. Colour is interpolated with bicubic weights and reflected borders; masks use nearest neighbours, so no photo bleeds past its edge.
-- Exposure. Gains are estimated on 8-bit copies at seam resolution, ignoring overlaps whose content does not agree (similarity below 0.15), and applied to the full-resolution pixels: one gain per photo and colour channel by default, or a grid of gains per photo for vignetting.
-- Seams. A graph cut on colour and gradient differences (`COST_COLOR_GRAD`) at about 0.1 megapixels per photo, dynamic programming above 30 photos, or the Voronoi split halfway between photos.
-- Blending. Multi-band blending on 16-bit signed pyramids, with the values scaled so that the largest gain still fits. With Original values the seams are hard: every pixel is copied from one warped photo.
+- Projection: rotation panoramas use OpenCV's plane (rectilinear), cylindrical and spherical warpers, with the yaw recentred on the middle of the panorama. Automatic projection picks rectilinear when the horizontal and vertical fields of view are both within 100 degrees and no photo is more than 60 degrees off axis, cylindrical when only the vertical field is within 100 degrees, and spherical otherwise. Panoramas of 330 degrees or more are refused for now. Planar models are warped with `warpPerspective` onto the reference photo's plane. Colour is interpolated with bicubic weights and reflected borders; masks use nearest neighbours, so no photo bleeds past its edge.
+- Exposure: gains are estimated on 8-bit copies at seam resolution and applied to the 16-bit pixels at output size. By default there is one gain per photo and colour channel, estimated only on overlap pixels whose colours differ by at most 0.15 (normalised RGB distance), so that glare and parallax do not bias it; the alternative is a grid of gains per photo, for vignetting.
+- Seams: a graph cut on colour and gradient differences (`COST_COLOR_GRAD`) at about 0.1 megapixels per photo, dynamic programming above 30 photos, or the Voronoi split halfway between photos.
+- Blending: multi-band blending on 16-bit signed pyramids, with the values scaled so that the largest gain still fits. With Original values the seams are hard: every pixel is copied from one warped photo.
 
 The panorama is uncropped RGBA at 16 bits per channel, unpremultiplied, in the photos' own colour space when they share one (Display P3 for iPhone photos) and in Display P3 otherwise. Its largest axis-aligned rectangle without transparent pixels is found exactly with the histogram method up to 60 megapixels, and on a reduced mask with a conservative mapping back above that. If the panorama would need more than half the Mac's memory, it is made at a lower resolution and the result says so. `PanoramaWriter` writes PNG, JPEG, TIFF (LZW at 8 bits, Deflate at 16) or HEIC through ImageIO, flattening the transparent area onto white for the formats without alpha, and replaces an existing file only once the new one is complete.
 

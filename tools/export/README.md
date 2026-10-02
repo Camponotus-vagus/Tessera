@@ -5,7 +5,7 @@ Tessera uses RaCo-ALIKED (keypoints and descriptors) and LightGlue (matching), s
 | File | Runtime | Contents |
 |---|---|---|
 | `raco_aliked_levels_<H>x<W>_fp32.mlpackage` | Core ML (GPU) | default: score map, ranker map and ALIKED's four feature levels at their own resolution |
-| `raco_select_k2048_<H>x<W>.onnx` | ONNX Runtime (CPU) | default: non-maximum suppression, top-k, sub-pixel refinement, ranker on the candidates |
+| `raco_select_k2048_<H>x<W>.onnx` | ONNX Runtime (CPU) | for comparison: RaCo's original keypoint selection (non-maximum suppression, top-k, sub-pixel refinement, ranker on the candidates), used only by `stitchbench --onnx-select` and the tests in builds with ONNX Runtime; by default `select.cpp` does the same in C++ |
 | `aliked_descriptor_head.bin` | C++ (Accelerate) | default: weights of the descriptor head, evaluated only at the pixels it reads |
 | `lightglue_raco_aliked_k2048_<fp16\|fp32>.mlpackage` | Core ML (GPU) | default: matcher (fp16 is the default precision) |
 | `raco_aliked_dense_<H>x<W>_<fp32\|fp16>.mlpackage` | Core ML (GPU) | alternative split: full-resolution feature map (128 channels) |
@@ -23,7 +23,7 @@ Two virtual environments are needed: Homebrew's PyTorch only exists for Python 3
 - `.venv-coreml`: Homebrew Python 3.13 with torch, torchvision, coremltools, onnx, onnxscript and onnxruntime from PyPI.
 
 ```bash
-brew install pytorch torchvision python@3.13
+brew install pytorch torchvision python@3.13 uv
 cd tools/export
 uv venv --python /opt/homebrew/bin/python3.14 --system-site-packages .venv
 echo /opt/homebrew/opt/pytorch/libexec/lib/python3.14/site-packages > .venv/lib/python3.14/site-packages/homebrew-pytorch.pth
@@ -55,4 +55,4 @@ Checks and measurements, from the repository root:
 - RaCo's boundary ranker evaluates the ranker on patches around the candidates. On the GPU the full ranker map is computed and sampled instead, with identical results.
 - The matcher returns, for every keypoint of the first image, its partner in the second and a confidence (0 when the pair is not mutual), instead of a variable-length match list.
 - In ALIKED's descriptor head, the convolutions (3x3 on patches, 1x1 on samples) are written as matrix products, which ONNX Runtime runs much faster.
-- The default split does not produce the 128-channel full-resolution feature map (400 MB): Core ML returns the four feature levels, and C++ rebuilds the bilinear (align_corners) upsampling and normalisation at the pixels the head reads. Checked in NumPy (difference 3.5e-6) and by a Swift test against the alternative split (identical keypoints, descriptors within 5e-6).
+- The default split does not produce the 128-channel full-resolution feature map (400 MB): Core ML returns the four feature levels, and C++ rebuilds the bilinear (align_corners) upsampling and normalisation at the pixels the head reads. Checked in NumPy (difference 3.5e-6) and by `DescriptorHeadTests` against the alternative split, which needs ONNX Runtime and the full exported set (measured: identical keypoints, descriptors within 5e-6).

@@ -2,7 +2,7 @@
 
 Tessera is a macOS app that joins photos into panoramas and mosaics and shows you how they fit together. It is made for landscapes shot by turning the camera, for mosaics of flat subjects photographed under a microscope or a macro lens, and for documents photographed in pieces.
 
-When a stitcher fails it usually says something like "not enough similarities". Tessera tells you which pair failed and why (too few matches, a transform that folds the image, inliers bunched on a strip of repeated labels, a result indistinguishable from chance), and it shows you the matches so you can check for yourself. When the photos connect, it aligns them, blends them and exports the panorama as JPEG, PNG, TIFF or HEIC.
+When a stitcher fails, it often says little more than "not enough similarities". Tessera tells you which pair failed and why (too few matches, a transform that folds the image, inliers bunched on a strip of repeated labels, a result indistinguishable from chance), and it shows you the matches so you can check for yourself. When the photos connect, it aligns and blends them into one panorama, which you can export as JPEG, PNG, TIFF or HEIC.
 
 ![Panorama view: four photos of a box of pinned ants joined into one image, with the outline of each photo](docs/images/panorama-view.jpg)
 
@@ -38,7 +38,7 @@ Tessera works right away with RootSIFT, the classical matcher. The learned match
 
 1. Drop the photos on the window, or click Import Photos.
 2. Click Stitch (⇧⌘R). Tessera analyses the photos, aligns the largest group of connected photos and blends it into one image, which appears in the Panorama view (⌘3). Photo outlines draws where each photo landed, and Crop to a rectangle keeps the largest rectangle without empty corners.
-3. Click Export (⌘E). JPEG and HEIC have a quality setting. PNG and TIFF can keep 16 bits per channel and, when the panorama is not cropped, a transparent background around it.
+3. Click Export… above the panorama, or choose File > Export Panorama… (⌘E). JPEG and HEIC have a quality setting. PNG and TIFF can keep 16 bits per channel and, when the panorama is not cropped, a transparent background around it.
 
 If some photos are left out, the Graph view (⌘1) says why for each of them. Clicking an edge opens the Pair view (⌘2) with the matches between those two photos, and Analyze (⌘R) runs only this part, without stitching.
 
@@ -47,7 +47,7 @@ The settings inspector has, among others:
 - Mode: Automatic, Rotation for a camera that turns on the spot, Plane for tiles of a flat subject (microscope slides, insect drawers), or Document for a flat original shot from different angles.
 - Projection, for rotation panoramas: Rectilinear, Cylindrical or Spherical. Automatic picks rectilinear for narrow fields of view, cylindrical for wide ones and spherical when the panorama is also tall. Planar mosaics and documents are always flat.
 - Size: full resolution, half or a quarter.
-- Pixels: Blended across seams (seams follow the edges of objects and are blended over a wide band), or Original values, where each pixel comes from a single photo. For measurements, set Exposure to Unchanged under Advanced as well, so that the values stay those of the photo.
+- Pixels: Blended across seams (seams follow the edges of objects and are blended over a wide band), or Original values, where each pixel comes from a single photo. For measurements, set Exposure to Unchanged under Advanced as well, so that no gain is applied: each pixel is then interpolated from one photo by the warp (bicubic), without gains or blending. Photos that do not share one colour space are converted to Display P3.
 
 ## Command line
 
@@ -86,7 +86,7 @@ ONNX Runtime is optional. With `brew install onnxruntime` and `TESSERA_TRAITS=on
 3. Matching: RootSIFT with Lowe's ratio test and a mutual check, computed as one matrix product with Accelerate; LightGlue on Core ML.
 4. Verification: RANSAC for translation and similarity and MAGSAC++ (OpenCV USAC) for affine and homography, then an a-contrario test (number of false alarms), a check that the inliers cover more than a strip, and a plausibility check on the transform.
 5. Graph: connected groups of verified pairs, with a reason for every photo left out.
-6. Global alignment: planar mosaics are solved by weighted least squares on the inliers of all verified pairs (translation, similarity or affine), or by Levenberg-Marquardt for homographies. Rotation panoramas use OpenCV's bundle adjuster, with the focal length taken from the EXIF data when present, and wave correction to level the horizon. Pairs that disagree with the rest are dropped while the group stays connected.
+6. Global alignment: planar mosaics are solved by weighted least squares on the inliers of all verified pairs (translation, similarity or affine), or by Levenberg-Marquardt for homographies. Rotation panoramas use OpenCV's bundle adjuster, starting from the EXIF focal length when every photo has one, and wave correction to level the horizon. Pairs that disagree with the rest are dropped while the group stays connected.
 7. Compositing: each photo is warped to the chosen projection, exposure is compensated per photo and colour channel, a graph cut places the seams around objects, and multi-band blending hides them. The result keeps 16 bits per channel, and its largest rectangle without empty corners is found exactly up to 60 megapixels.
 
 More detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Timings on an M5 MacBook Air are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md): six 12-megapixel photos are analysed in about a second and stitched in about two more.

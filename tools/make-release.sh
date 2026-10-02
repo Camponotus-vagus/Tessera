@@ -6,7 +6,7 @@ set -euo pipefail
 root="${0:A:h:h}"
 cd "$root"
 [ -d Vendor/opencv/lib ] || tools/build-opencv.sh
-TESSERA_TRAITS= tools/make-app.sh release > /dev/null
+TESSERA_TRAITS= TESSERA_VERSION="${1:-${TESSERA_VERSION:-}}" tools/make-app.sh release > /dev/null
 app="$root/build/Tessera.app"
 version="${1:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")}"
 out="$root/build/release"
