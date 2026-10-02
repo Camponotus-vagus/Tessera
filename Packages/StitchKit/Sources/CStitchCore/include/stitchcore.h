@@ -259,11 +259,18 @@ typedef struct {
 
 typedef struct sc_compositor sc_compositor;
 
-/// Plans the panorama: output size and photo outlines are known before any pixel is added.
+/// Largest panorama side in output pixels. sc_compositor_prepare refuses a larger canvas, so a caller lowers
+/// the scale until sc_compositor_canvas_size fits.
+#define SC_MAX_PANORAMA_SIDE 200000
+
+/// Plans the panorama: output size and photo outlines are known before any pixel is added. Fails when a
+/// photo maps behind the projection plane or too far from the others (a degenerate alignment).
 sc_compositor *sc_compositor_create(const sc_compose_image *images, int32_t count, const sc_compose_options *options,
                                     char *error, size_t error_length);
 void sc_compositor_free(sc_compositor *compositor);
-/// Makes the current or next call return 2 (cancelled). Safe from any thread.
+/// Makes the current or next call return 2 (cancelled). It is checked between photos and between the pairs
+/// of photos whose seam is being found; the final blend in sc_compositor_finish runs to its end. Safe from
+/// any thread.
 void sc_compositor_cancel(sc_compositor *compositor);
 void sc_compositor_canvas_size(const sc_compositor *compositor, int32_t *width, int32_t *height);
 /// Outline of photo `index` in panorama pixels, sampled along its edges: up to `capacity` points
@@ -273,16 +280,20 @@ int32_t sc_compositor_outline(const sc_compositor *compositor, int32_t index, fl
 void sc_compositor_seam_size(const sc_compositor *compositor, int32_t index, int32_t *width, int32_t *height);
 void sc_compositor_image_size(const sc_compositor *compositor, int32_t index, int32_t *width, int32_t *height);
 /// Every photo once, RGBA 16-bit as stored in the file (`width` x `height`) with its EXIF `orientation`
-/// (1-8); once oriented it must have the size of sc_compositor_seam_size. Returns 0, 1 (error) or 2 (cancelled).
+/// (1-8); once oriented it must have the size of sc_compositor_seam_size. Returns 0, 1 (error, also when the
+/// warped seam copy would exceed SC_MAX_PANORAMA_SIDE on a side: lower seam_scale) or 2 (cancelled).
 int32_t sc_compositor_add_seam_image(sc_compositor *compositor, int32_t index, const uint16_t *rgba, int32_t width,
                                      int32_t height, int32_t bytes_per_row, int32_t orientation, char *error,
                                      size_t error_length);
-/// Exposure gains and seams, after every seam image.
+/// Exposure gains and seams, after every seam image. Returns 0, 1 (error, also for a canvas larger than
+/// SC_MAX_PANORAMA_SIDE) or 2 (cancelled).
 int32_t sc_compositor_prepare(sc_compositor *compositor, char *error, size_t error_length);
 /// Every photo once after preparing, as for the seam images but at sc_compositor_image_size.
 int32_t sc_compositor_add_image(sc_compositor *compositor, int32_t index, const uint16_t *rgba, int32_t width,
                                 int32_t height, int32_t bytes_per_row, int32_t orientation, char *error,
                                 size_t error_length);
+/// Blends the photos into `panorama` (free it with sc_panorama_free), after every photo. Only one call
+/// succeeds: a second one returns 1. Returns 0, 1 (error) or 2 (cancelled).
 int32_t sc_compositor_finish(sc_compositor *compositor, sc_panorama *panorama, char *error, size_t error_length);
 void sc_panorama_free(sc_panorama *panorama);
 

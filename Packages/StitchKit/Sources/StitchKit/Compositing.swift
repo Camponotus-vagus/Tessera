@@ -1,3 +1,4 @@
+import Accelerate
 import CoreGraphics
 import CStitchCore
 import Foundation
@@ -22,7 +23,9 @@ extension ImageLoader {
     }
 
     /// The full image decoded by ImageIO (not the thumbnail path, which decodes JPEG slightly differently),
-    /// drawn into `space` at a size that becomes `target` once oriented. 8-bit sources come out as 257 x v.
+    /// at a size that becomes `target` once oriented. 8-bit sources come out as 257 x v. The photo is drawn
+    /// at its own size and resampled with vImage, whose pixel centres map as (x + 0.5) * r - 0.5, the map the
+    /// compositor places copies by; CoreGraphics would map corner pixels to corner pixels instead.
     static func stored(_ image: SourceImage, target: PixelSize, space: CGColorSpace) throws -> StoredPixels {
         guard let source = CGImageSourceCreateWithURL(image.url as CFURL, nil) else {
             throw StitchError.cannotOpen(image.url)
@@ -36,6 +39,27 @@ extension ImageLoader {
             : PixelSize(width: decoded.width, height: decoded.height)
         guard oriented == image.pixelSize else { throw StitchError.photoChanged(image.url) }
         let width = swapped ? target.height : target.width, height = swapped ? target.width : target.height
+        let full = try draw(decoded, space: space, url: image.url)
+        if width == decoded.width && height == decoded.height {
+            return StoredPixels(width: width, height: height, orientation: orientation, pixels: full)
+        }
+        var pixels = [UInt16](unsafeUninitializedCapacity: width * height * 4) { _, count in count = width * height * 4 }
+        let status = full.withUnsafeBufferPointer { input in
+            pixels.withUnsafeMutableBufferPointer { output in
+                var from = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: input.baseAddress), height: vImagePixelCount(decoded.height),
+                                         width: vImagePixelCount(decoded.width), rowBytes: decoded.width * 8)
+                var to = vImage_Buffer(data: output.baseAddress, height: vImagePixelCount(height), width: vImagePixelCount(width),
+                                       rowBytes: width * 8)
+                return vImageScale_ARGB16U(&from, &to, nil, vImage_Flags(kvImageHighQualityResampling))
+            }
+        }
+        guard status == kvImageNoError else { throw StitchError.cannotDecode(image.url) }
+        return StoredPixels(width: width, height: height, orientation: orientation, pixels: pixels)
+    }
+
+    /// RGBX, 16 bits per channel, of `image` at its own size in `space`, transparent areas white.
+    private static func draw(_ image: CGImage, space: CGColorSpace, url: URL) throws -> [UInt16] {
+        let width = image.width, height = image.height
         var pixels = [UInt16](unsafeUninitializedCapacity: width * height * 4) { _, count in count = width * height * 4 }
         let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
             guard let context = CGContext(
@@ -43,14 +67,13 @@ extension ImageLoader {
                 space: space,
                 bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGImageByteOrderInfo.order16Little.rawValue
             ) else { return false }
-            context.interpolationQuality = .high
             context.setFillColor(gray: 1, alpha: 1)
             context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-            context.draw(decoded, in: CGRect(x: 0, y: 0, width: width, height: height))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
             return true
         }
-        guard drawn else { throw StitchError.cannotDecode(image.url) }
-        return StoredPixels(width: width, height: height, orientation: orientation, pixels: pixels)
+        guard drawn else { throw StitchError.cannotDecode(url) }
+        return pixels
     }
 
     /// The photos' own colour space when they all share one RGB space (an iPhone's Display P3), else
@@ -223,6 +246,19 @@ extension StitchEngine {
     /// (about 45 B/px measured), the direct composite an image and a mask; plus the result kept afterwards.
     static func bytesPerPixel(_ blending: Blending) -> Double { blending == .multiBand ? 53 : 23 }
 
+    /// The output scale for a panorama whose canvas is `canvas` at scale `requested`: lowered so that it
+    /// takes at most half of `memory` and at most SC_MAX_PANORAMA_SIDE pixels per side.
+    static func outputScale(canvas: PixelSize, requested: Double, bytesPerPixel: Double, memory: UInt64)
+        -> (scale: Double, limitedBySize: Bool) {
+        let budget = 0.5 * Double(memory)
+        let needed = Double(canvas.width) * Double(canvas.height) * bytesPerPixel
+        let byMemory = needed > budget ? (budget / needed).squareRoot() * 0.98 : 1
+        // A few pixels under the limit: the canvas is rounded outwards to whole pixels at the new scale.
+        let side = Double(max(canvas.width, canvas.height)), limit = Double(SC_MAX_PANORAMA_SIDE)
+        let bySize = side > limit ? (limit - 4) / side : 1
+        return (requested * min(byMemory, bySize), bySize < byMemory)
+    }
+
     /// Joins the main group of `report` into one image. The photos are decoded again from their files, so
     /// the report must have its local paths. Cancelling the calling task stops the work at the next photo.
     /// Progress stages: "align", "seams" (k of n), "exposure", "compose" (k of n), "blend".
@@ -247,6 +283,17 @@ extension StitchEngine {
             transforms = layout.rotations
         } else {
             projection = .flat
+            // The compositor refuses a photo whose corner falls behind the plane or towards infinity.
+            for (image, t) in zip(images, transforms) {
+                let w = Double(image.pixelSize.width - 1), h = Double(image.pixelSize.height - 1)
+                for (x, y) in [(0.0, 0.0), (w, 0), (w, h), (0, h)] {
+                    let z = t[6] * x + t[7] * y + t[8]
+                    let u = (t[0] * x + t[1] * y + t[2]) / z, v = (t[3] * x + t[4] * y + t[5]) / z
+                    guard z > 1e-9, abs(u) < 1e7, abs(v) < 1e7 else {
+                        throw StitchError.engine(String(localized: "The photos cannot be laid on one plane: try Rotation mode"))
+                    }
+                }
+            }
         }
         let native: sc_projection = switch projection {
         case .rectilinear: SC_PROJECTION_RECTILINEAR
@@ -267,7 +314,8 @@ extension StitchEngine {
         var options = sc_compose_options()
         options.projection = native
         options.scale = request.size.scale
-        options.seam_scale = min(1, (seamMegapixels * 1_000_000 / areas[areas.count / 2]).squareRoot())
+        // Never above the output scale: the memory budget below covers the output canvas only.
+        options.seam_scale = min(options.scale, (seamMegapixels * 1_000_000 / areas[areas.count / 2]).squareRoot())
         options.seam = request.seams == .voronoi ? SC_SEAM_VORONOI : images.count > 30 ? SC_SEAM_DP : SC_SEAM_GRAPHCUT
         options.exposure = switch request.exposure {
         case .channels: SC_EXPOSURE_CHANNELS
@@ -278,14 +326,32 @@ extension StitchEngine {
         options.blend = request.blending == .none ? SC_BLEND_NONE : SC_BLEND_MULTIBAND
         options.interpolation = 2
 
-        // Lower the resolution when the panorama would not fit in half the memory.
+        // Lower the resolution when the panorama would not fit in half the memory or exceed the size limit.
         var compositor = try Compositor(images: composeImages, options: options)
-        let budget = 0.5 * Double(ProcessInfo.processInfo.physicalMemory)
-        let needed = Double(compositor.canvas.width * compositor.canvas.height) * Self.bytesPerPixel(request.blending)
-        if needed > budget {
-            options.scale *= (budget / needed).squareRoot() * 0.98
+        // Four times the size limit at the requested scale is not a mosaic but a broken alignment (a corner
+        // sent far away): refuse it rather than make a tiny panorama.
+        let planned = compositor.canvas
+        guard max(planned.width, planned.height) <= 4 * Int(SC_MAX_PANORAMA_SIDE) else {
+            throw StitchError.engine(String(format: String(localized: "The panorama would be %lld × %lld pixels: the alignment is probably wrong, try another mode"),
+                                            locale: .current, planned.width, planned.height))
+        }
+        let fitted = Self.outputScale(canvas: compositor.canvas, requested: options.scale,
+                                      bytesPerPixel: Self.bytesPerPixel(request.blending),
+                                      memory: ProcessInfo.processInfo.physicalMemory)
+        if fitted.scale < options.scale {
+            options.scale = fitted.scale
+            options.seam_scale = min(options.seam_scale, options.scale)
             compositor = try Compositor(images: composeImages, options: options)
-            notes.append(String(format: String(localized: "Made at %.0f%% of the requested size to fit in memory"), locale: .current, 100 * options.scale / request.size.scale))
+            let percent = 100 * options.scale / request.size.scale
+            notes.append(fitted.limitedBySize
+                ? String(format: String(localized: "Made at %.0f%% of the requested size: a panorama can be at most %lld pixels wide or tall"),
+                         locale: .current, percent, Int(SC_MAX_PANORAMA_SIDE))
+                : String(format: String(localized: "Made at %.0f%% of the requested size to fit in memory"), locale: .current, percent))
+        }
+        let canvas = compositor.canvas
+        guard max(canvas.width, canvas.height) <= Int(SC_MAX_PANORAMA_SIDE) else {
+            throw StitchError.engine(String(format: String(localized: "The panorama would be %lld × %lld pixels: it can be at most %lld per side"),
+                                            locale: .current, canvas.width, canvas.height, Int(SC_MAX_PANORAMA_SIDE)))
         }
         timings.alignment = (ContinuousClock.now - start).seconds
 

@@ -2,14 +2,16 @@
 //
 // Swift drives it one photo at a time so memory stays bounded: first a small 8-bit copy of every photo
 // (exposure and seams are estimated on those), then each photo at the output scale, 16 bits per channel.
-// OpenCV's blenders work in CV_16S and wrap around on overflow, so values are scaled to at most
-// 14 bits before feeding and back afterwards.
+// OpenCV's blenders work in CV_16S and wrap around on overflow, so values are scaled down before feeding
+// (by the largest gain and by the most photos that meet at one pixel) and back afterwards.
 
 #include "stitchcore.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -48,11 +50,12 @@ struct sc_compositor {
     std::vector<cv::Point> corners;       // per photo, at the output scale
     std::vector<cv::Size> sizes;
     std::vector<cv::Mat> gains;
-    double value_scale = 0.25;            // 16-bit value -> blender value (at most 14 bits after gains)
+    double value_scale = 0.25;            // 16-bit value -> blender value, small enough that sums cannot wrap
     cv::Ptr<cd::Blender> blender;
     cv::Mat hard, hard_mask;              // SC_BLEND_NONE: direct composite, CV_16UC3 and CV_8U
     std::vector<bool> added;
     bool prepared = false;
+    bool finished = false;                // finish releases the blender: it can run only once
     std::atomic<bool> cancelled{false};
 };
 
@@ -77,13 +80,24 @@ cv::Ptr<cd::RotationWarper> rotation_warper(const sc_compositor &c, double scale
     }
 }
 
+cv::Size scaled(const cv::Size &size, double scale) {
+    return cv::Size(std::max(1, int(std::lround(size.width * scale))), std::max(1, int(std::lround(size.height * scale))));
+}
+
+// From full-resolution pixels of photo i to the pixels of its copy at `scale`, whose size is rounded:
+// pixel centres map as (x + 0.5) * r - 0.5 with r = scaled width / full width, as resampling does.
+cv::Matx33d photo_to_scaled(const sc_compositor &c, int i, double scale) {
+    const cv::Size size = scaled(c.full[i], scale);
+    const double rx = double(size.width) / c.full[i].width, ry = double(size.height) / c.full[i].height;
+    return cv::Matx33d(rx, 0, 0.5 * rx - 0.5, 0, ry, 0.5 * ry - 0.5, 0, 0, 1);
+}
+
 cv::Mat camera_K(const sc_compositor &c, int i, double scale) {
-    cv::Mat K = cv::Mat::eye(3, 3, CV_32F);
-    K.at<float>(0, 0) = float(c.focal[i] * scale);
-    K.at<float>(1, 1) = float(c.focal[i] * scale);
-    K.at<float>(0, 2) = float(c.full[i].width * 0.5 * scale);
-    K.at<float>(1, 2) = float(c.full[i].height * 0.5 * scale);
-    return K;
+    const cv::Matx33d full(c.focal[i], 0, c.full[i].width * 0.5, 0, c.focal[i], c.full[i].height * 0.5, 0, 0, 1);
+    const cv::Matx33d K = photo_to_scaled(c, i, scale) * full;
+    cv::Mat result(3, 3, CV_32F);
+    for (int k = 0; k < 9; ++k) result.at<float>(k / 3, k % 3) = float(K.val[k]);
+    return result;
 }
 
 cv::Mat camera_R(const sc_compositor &c, int i) {
@@ -92,15 +106,15 @@ cv::Mat camera_R(const sc_compositor &c, int i) {
     return R;
 }
 
-// Planar map at `scale`: from the photo resized by `scale` to the mosaic resized by `scale`.
+// Planar map at `scale`: from the copy of the photo at `scale` (rounded size) to the mosaic at `scale`,
+// both with pixel centres at integers.
 cv::Matx33d planar_at(const sc_compositor &c, int i, double scale) {
-    const cv::Matx33d S(scale, 0, 0, 0, scale, 0, 0, 0, 1);
-    return S * c.transform[i] * S.inv();
+    const cv::Matx33d mosaic(scale, 0, 0.5 * scale - 0.5, 0, scale, 0.5 * scale - 0.5, 0, 0, 1);
+    return mosaic * c.transform[i] * photo_to_scaled(c, i, scale).inv();
 }
 
-cv::Size scaled(const cv::Size &size, double scale) {
-    return cv::Size(std::max(1, int(std::lround(size.width * scale))), std::max(1, int(std::lround(size.height * scale))));
-}
+// Mosaic coordinates beyond this many pixels mean a degenerate alignment (a corner sent towards infinity).
+constexpr double far_limit = 1e7;
 
 // Pixels covered by a photo of `size` mapped by a planar map (the bounding box of its corner pixel centres);
 // throws when a corner falls behind the plane.
@@ -111,10 +125,14 @@ cv::Rect planar_roi(const cv::Matx33d &M, const cv::Size &size) {
     for (const cv::Point2d &p : corners) {
         const cv::Vec3d q = M * cv::Vec3d(p.x, p.y, 1);
         if (!(q[2] > 1e-9)) throw std::runtime_error("a photo maps behind the projection plane");
-        minx = std::min(minx, q[0] / q[2]);
-        maxx = std::max(maxx, q[0] / q[2]);
-        miny = std::min(miny, q[1] / q[2]);
-        maxy = std::max(maxy, q[1] / q[2]);
+        const double x = q[0] / q[2], y = q[1] / q[2];
+        if (!(std::abs(x) < far_limit && std::abs(y) < far_limit)) {
+            throw std::runtime_error("a photo maps too far from the others (the alignment is degenerate)");
+        }
+        minx = std::min(minx, x);
+        maxx = std::max(maxx, x);
+        miny = std::min(miny, y);
+        maxy = std::max(maxy, y);
     }
     // A small tolerance keeps exact integer positions from picking up a neighbouring pixel.
     const cv::Point tl(int(std::floor(minx + 1e-6)), int(std::floor(miny + 1e-6)));
@@ -249,6 +267,53 @@ cv::Scalar as_scalar(const cv::Mat &single) {
     return cv::Scalar(g[0], g[1], g[2]);
 }
 
+// Finds the seams one pair of photos at a time, checking for cancellation in between. OpenCV's finders
+// work pair by pair too, in the same order: GraphCut takes the pairs as i < j, DP by decreasing distance
+// between the photos' centres (its private ImagePairLess, then reversed).
+void find_seams(sc_compositor &c, const std::vector<cv::UMat> &images, cv::Ptr<cd::SeamFinder> finder) {
+    std::vector<std::pair<size_t, size_t>> pairs;
+    for (size_t i = 0; i + 1 < images.size(); ++i)
+        for (size_t j = i + 1; j < images.size(); ++j) pairs.emplace_back(i, j);
+    if (c.options.seam == SC_SEAM_DP) {
+        auto distance = [&](const std::pair<size_t, size_t> &p) {
+            const cv::Point a = c.seam_corners[p.first] + cv::Point(images[p.first].cols / 2, images[p.first].rows / 2);
+            const cv::Point b = c.seam_corners[p.second] + cv::Point(images[p.second].cols / 2, images[p.second].rows / 2);
+            return (a - b).dot(a - b);
+        };
+        std::sort(pairs.begin(), pairs.end(), [&](const auto &l, const auto &r) { return distance(l) < distance(r); });
+        std::reverse(pairs.begin(), pairs.end());
+    }
+    for (const auto &[i, j] : pairs) {
+        check(c);
+        cv::Rect overlap;
+        if (!cd::overlapRoi(c.seam_corners[i], c.seam_corners[j], images[i].size(), images[j].size(), overlap)) continue;
+        // The headers share the masks' data, so the finder updates c.seam_masks in place.
+        std::vector<cv::UMat> pair_images{images[i], images[j]}, pair_masks{c.seam_masks[i], c.seam_masks[j]};
+        const std::vector<cv::Point> pair_corners{c.seam_corners[i], c.seam_corners[j]};
+        finder->find(pair_images, pair_corners, pair_masks);
+    }
+}
+
+// The most photos whose masks can reach one output pixel, from the seam copies: each mask is dilated as
+// sc_compositor_add_image dilates it, and twice more because scaling it up from its seam ROI to its output
+// ROI can shift it by more than one seam pixel (rotation warpers round their ROIs towards zero).
+int most_overlapping(const sc_compositor &c) {
+    std::vector<cv::Size> sizes;
+    for (const cv::UMat &mask : c.seam_masks) sizes.push_back(mask.size());
+    const cv::Rect area = cd::resultRoi(c.seam_corners, sizes);
+    cv::Mat count = cv::Mat::zeros(area.size(), CV_8U);
+    const int dilations = c.count > 1 && c.options.seam != SC_SEAM_NONE ? 3 : 2;
+    for (int i = 0; i < c.count; ++i) {
+        cv::Mat reach;
+        cv::dilate(c.seam_masks[i], reach, cv::Mat(), cv::Point(-1, -1), dilations);
+        cv::Mat region = count(cv::Rect(c.seam_corners[i] - area.tl(), reach.size()));
+        cv::add(region, cv::Scalar(1), region, reach > 0);
+    }
+    double most = 1;
+    cv::minMaxLoc(count, nullptr, &most);
+    return std::max(1, int(most));
+}
+
 }  // namespace
 
 extern "C" sc_compositor *sc_compositor_create(const sc_compose_image *images, int32_t count,
@@ -286,10 +351,9 @@ extern "C" sc_compositor *sc_compositor_create(const sc_compose_image *images, i
         const cv::Rect canvas = cd::resultRoi(tls, sizes);
         c->origin = canvas.tl();
         c->canvas = canvas.size();
-        if (c->canvas.width < 1 || c->canvas.height < 1 || c->canvas.width > 200000 || c->canvas.height > 200000) {
-            throw std::runtime_error("the panorama would be " + std::to_string(c->canvas.width) + " x " +
-                                     std::to_string(c->canvas.height) + " pixels");
-        }
+        // A canvas over SC_MAX_PANORAMA_SIDE is planned anyway, so that the caller can read its size and lower
+        // the scale; sc_compositor_prepare refuses it.
+        if (c->canvas.width < 1 || c->canvas.height < 1) throw std::runtime_error("the panorama is empty");
         c->seam_corners.resize(count);
         c->seam_images.resize(count);
         c->seam_masks.resize(count);
@@ -373,6 +437,11 @@ extern "C" int32_t sc_compositor_add_seam_image(sc_compositor *c, int32_t index,
     try {
         check(*c);
         const cv::Size size = scaled(c->full[index], c->options.seam_scale);
+        const cv::Rect roi = warp_roi(*c, index, c->options.seam_scale);
+        if (roi.width > SC_MAX_PANORAMA_SIDE || roi.height > SC_MAX_PANORAMA_SIDE) {
+            throw std::runtime_error("the seam copy of a photo would be " + std::to_string(roi.width) + " x " +
+                                     std::to_string(roi.height) + " pixels: lower seam_scale");
+        }
         // Exposure compensation and graph cut expect 0..255 values.
         cv::Mat rgb, warped, mask;
         rgb_from(rgba, width, height, bytes_per_row, orientation, size).convertTo(rgb, CV_8U, 1.0 / 257.0);
@@ -397,6 +466,11 @@ extern "C" int32_t sc_compositor_prepare(sc_compositor *c, char *error, size_t e
     }
     try {
         check(*c);
+        if (c->canvas.width > SC_MAX_PANORAMA_SIDE || c->canvas.height > SC_MAX_PANORAMA_SIDE) {
+            throw std::runtime_error("the panorama would be " + std::to_string(c->canvas.width) + " x " +
+                                     std::to_string(c->canvas.height) + " pixels, more than " +
+                                     std::to_string(SC_MAX_PANORAMA_SIDE) + " per side");
+        }
         // Exposure: gains estimated on the 8-bit seam copies, applied by us at full precision.
         double gmax = 1;
         if (c->options.exposure != SC_EXPOSURE_NONE) {
@@ -426,12 +500,6 @@ extern "C" int32_t sc_compositor_prepare(sc_compositor *c, char *error, size_t e
             }
         }
         check(*c);
-        // The blender sums in 16-bit integers: 16-bit values times the largest gain must stay below 2^14,
-        // which leaves room for the two dilated masks that meet at a seam. Without seams every photo can
-        // overlap every other.
-        c->value_scale = 16383.0 / (65535.0 * gmax);
-        if (c->options.seam == SC_SEAM_NONE && c->options.blend != SC_BLEND_NONE) c->value_scale /= std::max(1, c->count / 2);
-
         if (c->options.seam != SC_SEAM_NONE && c->count > 1) {
             std::vector<cv::UMat> images(c->count);
             for (int i = 0; i < c->count; ++i) c->seam_images[i].convertTo(images[i], CV_32F);
@@ -441,10 +509,15 @@ extern "C" int32_t sc_compositor_prepare(sc_compositor *c, char *error, size_t e
                 case SC_SEAM_DP: finder = cv::makePtr<cd::DpSeamFinder>(cd::DpSeamFinder::COLOR_GRAD); break;
                 default: finder = cv::makePtr<cd::GraphCutSeamFinder>(cd::GraphCutSeamFinderBase::COST_COLOR_GRAD); break;
             }
-            finder->find(images, c->seam_corners, c->seam_masks);
+            find_seams(*c, images, finder);
         }
         c->seam_images.clear();
         check(*c);
+        // The blender sums the weighted Laplacians of every photo in 16-bit integers. Each is at most the
+        // largest value, the weights of k overlapping photos add up to at most k, so values times the
+        // largest gain times the most overlapping photos must stay below 2^15.
+        // Rounded down: convertTo rounds to nearest, and 32768 / k fed values would sum to 32768.
+        c->value_scale = std::floor(32767.0 / std::max(2, most_overlapping(*c))) / (65535.0 * gmax);
 
         for (int i = 0; i < c->count; ++i) {
             const cv::Rect roi = warp_roi(*c, i, c->options.scale);
@@ -505,10 +578,13 @@ extern "C" int32_t sc_compositor_add_image(sc_compositor *c, int32_t index, cons
                 else cv::multiply(f, gains, f);
                 f.convertTo(values, CV_16U);
             }
+            // The scaled-up seam mask is graded at its edges; any pixel it reaches is covered here, by the
+            // photo added last, so the alpha of the result stays 0 or 255.
+            const cv::Mat covered = mask > 0;
             const cv::Rect target(tl - c->origin, warped.size());
-            values.copyTo(c->hard(target), mask);
+            values.copyTo(c->hard(target), covered);
             cv::Mat region = c->hard_mask(target);
-            cv::bitwise_or(region, mask, region);
+            cv::bitwise_or(region, covered, region);
         } else {
             cv::Mat feed;
             if (gains.empty()) {
@@ -538,8 +614,13 @@ extern "C" int32_t sc_compositor_finish(sc_compositor *c, sc_panorama *out, char
         write_error(error, error_length, "every photo must be added before finishing");
         return 1;
     }
+    if (c->finished) {
+        write_error(error, error_length, "the panorama was already finished");
+        return 1;
+    }
     try {
         check(*c);
+        c->finished = true;
         cv::Mat values, mask;
         if (c->options.blend == SC_BLEND_NONE) {
             values = c->hard;
@@ -554,9 +635,10 @@ extern "C" int32_t sc_compositor_finish(sc_compositor *c, sc_panorama *out, char
         // The whole covered area with alpha = coverage; the largest rectangle without empty pixels is
         // returned alongside, so cropping can be switched without stitching again.
         const cv::Rect inscribed = inscribed_rectangle(mask);
-        uint16_t *pixels = stitchcore::allocate_array<uint16_t>(size_t(values.total()) * 4);
+        std::unique_ptr<uint16_t, decltype(&std::free)> pixels(
+            stitchcore::allocate_array<uint16_t>(size_t(values.total()) * 4), &std::free);
         if (pixels == nullptr) throw std::runtime_error("not enough memory for the panorama");
-        cv::Mat rgba(values.size(), CV_16UC4, pixels);
+        cv::Mat rgba(values.size(), CV_16UC4, pixels.get());
         cv::Mat alpha16;
         mask.convertTo(alpha16, CV_16U, 65535.0 / 255.0);
         const cv::Mat planes[2] = {values, alpha16};
@@ -571,7 +653,7 @@ extern "C" int32_t sc_compositor_finish(sc_compositor *c, sc_panorama *out, char
         out->crop[2] = inscribed.width;
         out->crop[3] = inscribed.height;
         out->opaque = cv::countNonZero(mask) == int(mask.total()) ? 1 : 0;
-        out->pixels = pixels;
+        out->pixels = pixels.release();
         c->hard.release();
         c->hard_mask.release();
         return 0;

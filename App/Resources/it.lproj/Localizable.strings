@@ -252,3 +252,7 @@
 "Cannot make the preview" = "Impossibile creare l'anteprima";
 "Cannot read %@" = "Impossibile leggere %@";
 "%@ is empty" = "%@ è vuoto";
+"Made at %.0f%% of the requested size: a panorama can be at most %lld pixels wide or tall" = "Creato al %.0f%% della dimensione richiesta: un panorama può avere al massimo %lld pixel di larghezza o di altezza";
+"The panorama would be %lld × %lld pixels: it can be at most %lld per side" = "Il panorama sarebbe di %lld × %lld pixel: al massimo se ne possono avere %lld per lato";
+"The photos cannot be laid on one plane: try Rotation mode" = "Le foto non si possono stendere su un unico piano: prova il modo Rotazione";
+"The panorama would be %lld × %lld pixels: the alignment is probably wrong, try another mode" = "Il panorama sarebbe di %lld × %lld pixel: probabilmente l'allineamento è sbagliato, prova un altro modo";

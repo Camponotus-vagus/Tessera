@@ -26,12 +26,12 @@ The app's default settings, which `stitchbench` gets with `--source both`: both 
 
 | Set | Model and projection | Panorama | Alignment error | Analysis | Stitching | Peak memory |
 |---|---|---|---|---|---|---|
-| Drawer | homography, flat | 14546 x 3855 (56 MP) | 4.4 px | 1.2 s | 1.9 s | 4.6 GB |
-| Box | homography, flat | 7808 x 4299 (34 MP) | 5.8 px | 1.1 s | 1.8 s | 3.4 GB |
-| Newspaper | similarity, flat | 1794 x 1138 | 0.42 px | 0.9 s | 0.7 s | 1.1 GB |
-| Boat | rotation, cylindrical | 10761 x 2752, cropped to 10726 x 2294 | 6.1 px | 1.1 s | 1.8 s | 3.2 GB |
+| Drawer | homography, flat | 14546 x 3855 (56 MP) | 4.4 px | 1.2 s | 1.9 s | 5.3 GB |
+| Box | homography, flat | 7808 x 4299 (34 MP) | 5.8 px | 1.1 s | 1.7 s | 3.8 GB |
+| Newspaper | similarity, flat | 1794 x 1138 | 0.42 px | 0.9 s | 0.8 s | 1.1 GB |
+| Boat | rotation, cylindrical | 10761 x 2752, cropped to 10726 x 2294 | 6.1 px | 1.1 s | 1.8 s | 3.6 GB |
 
-These runs had other work going on in the background (load average about 4): idle, the drawer's analysis takes 0.9 s, as in the table above. On the drawer the stitching time splits into 0.02 s of alignment, 0.41 s of seam finding, 1.02 s of warping and exposure and 0.35 s of blending; writing a JPEG takes another 0.26 s. The alignment errors of the drawer and the box come from parallax: the specimens stand on pins above the bottom of the drawer and the photos were taken by hand, so no single plane fits every match. The seams go around the specimens, which hides most of it. The newspaper, a flat page, aligns to under half a pixel.
+These runs had other work going on in the background (load average about 4): idle, the drawer's analysis takes 0.9 s, as in the table above. On the drawer the stitching time splits into 0.01 s of alignment, 0.56 s for the seam copies and seam finding, 0.88 s of warping and exposure and 0.32 s of blending; writing a JPEG takes another 0.25 s. The seam copies are decoded at full size and resampled with vImage, which costs about 0.15 s per set and a few hundred megabytes of peak memory compared with drawing them smaller directly, and keeps them where the compositor expects them. The alignment errors of the drawer and the box come from parallax: the specimens stand on pins above the bottom of the drawer and the photos were taken by hand, so no single plane fits every match. The seams go around the specimens, which hides most of it. The newspaper, a flat page, aligns to under half a pixel.
 
 ## Learned extractor, per photo (1024 x 768)
 
