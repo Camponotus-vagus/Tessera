@@ -1,12 +1,18 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.1
 // SwiftPM build of the app, used by tools/make-app.sh. The Xcode project comes from project.yml.
 import PackageDescription
 
 let package = Package(
     name: "Tessera",
-    platforms: [.macOS("27.0")],
+    platforms: [.macOS(.v15)],
+    traits: [
+        .trait(name: "ONNXRuntime", description: "Build StitchKit with ONNX Runtime (development builds)"),
+        .default(enabledTraits: ["ONNXRuntime"]),
+    ],
     dependencies: [
-        .package(path: "Packages/StitchKit"),
+        .package(path: "Packages/StitchKit", traits: [
+            .trait(name: "ONNXRuntime", condition: .when(traits: ["ONNXRuntime"])),
+        ]),
     ],
     targets: [
         .executableTarget(

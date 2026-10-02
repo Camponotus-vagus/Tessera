@@ -1,5 +1,18 @@
 #include "stitchcore.h"
 
+#include <cstdlib>
+
+#include "common.hpp"
+
+extern "C" void sc_extraction_free(sc_extraction *result) {
+    if (result == nullptr) return;
+    std::free(result->keypoints);
+    std::free(result->descriptors);
+    *result = sc_extraction{};
+}
+
+#ifdef TESSERA_ONNXRUNTIME
+
 #include <array>
 #include <cmath>
 #include <memory>
@@ -9,8 +22,6 @@
 #include <vector>
 
 #include <onnxruntime/onnxruntime_cxx_api.h>
-
-#include "common.hpp"
 
 using stitchcore::write_error;
 
@@ -233,13 +244,6 @@ int32_t collect(std::vector<Ort::Value> &outputs, sc_extraction *result) {
 
 }  // namespace
 
-extern "C" void sc_extraction_free(sc_extraction *result) {
-    if (result == nullptr) return;
-    std::free(result->keypoints);
-    std::free(result->descriptors);
-    *result = sc_extraction{};
-}
-
 extern "C" int32_t sc_match_learned(sc_onnx_model *model, const float *keypoints, const float *descriptors,
                                     int32_t keypoint_count, int32_t descriptor_size, int32_t *partner,
                                     float *confidence, char *error, size_t error_length) {
@@ -274,3 +278,50 @@ extern "C" int32_t sc_match_learned(sc_onnx_model *model, const float *keypoints
         return 1;
     }
 }
+
+extern "C" int32_t sc_onnx_available(void) { return 1; }
+
+#else
+
+// Built without ONNX Runtime: every ONNX entry point fails with a message, and the callers fall back
+// to the Core ML and C++ paths.
+
+namespace {
+constexpr const char *kNoRuntime = "Tessera was built without ONNX Runtime";
+}
+
+extern "C" sc_onnx_model *sc_onnx_model_create(const char *, sc_execution, const char *, int32_t, int32_t,
+                                              char *error, size_t error_length) {
+    stitchcore::write_error(error, error_length, kNoRuntime);
+    return nullptr;
+}
+
+extern "C" void sc_onnx_model_free(sc_onnx_model *) {}
+
+extern "C" int32_t sc_extract(sc_onnx_model *, const float *, int32_t, int32_t, sc_extraction *, char *error,
+                              size_t error_length) {
+    stitchcore::write_error(error, error_length, kNoRuntime);
+    return 1;
+}
+
+extern "C" int32_t sc_extract_sparse(sc_onnx_model *, const float *, const float *, const float *, int32_t, int32_t,
+                                     int32_t, sc_extraction *, char *error, size_t error_length) {
+    stitchcore::write_error(error, error_length, kNoRuntime);
+    return 1;
+}
+
+extern "C" int32_t sc_select_keypoints(sc_onnx_model *, const float *, const float *, int32_t, int32_t,
+                                       sc_extraction *, char *error, size_t error_length) {
+    stitchcore::write_error(error, error_length, kNoRuntime);
+    return 1;
+}
+
+extern "C" int32_t sc_match_learned(sc_onnx_model *, const float *, const float *, int32_t, int32_t, int32_t *,
+                                    float *, char *error, size_t error_length) {
+    stitchcore::write_error(error, error_length, kNoRuntime);
+    return 1;
+}
+
+extern "C" int32_t sc_onnx_available(void) { return 0; }
+
+#endif

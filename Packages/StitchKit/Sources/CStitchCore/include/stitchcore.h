@@ -96,6 +96,9 @@ typedef enum {
 /// An ONNX Runtime session for one of the split models.
 typedef struct sc_onnx_model sc_onnx_model;
 
+/// 1 when the library was built with ONNX Runtime; otherwise every ONNX entry point fails.
+int32_t sc_onnx_available(void);
+
 /// Loads a model. `cache_directory` may be NULL. `low_memory` != 0 disables the CPU arena.
 sc_onnx_model *sc_onnx_model_create(const char *model_path, sc_execution execution, const char *cache_directory,
                                     int32_t intra_op_threads, int32_t low_memory, char *error,
