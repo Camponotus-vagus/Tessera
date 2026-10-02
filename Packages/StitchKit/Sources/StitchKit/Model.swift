@@ -231,8 +231,8 @@ public struct PipelineConfiguration: Sendable, Codable {
     /// Core ML computes only ALIKED's low-resolution feature levels and the descriptor head runs in C++
     /// on the pixels it needs; false keeps the full-resolution feature map and the ONNX head.
     public var fastDescriptorHead = true
-    /// With the fast descriptor head, true selects the keypoints in C++ instead of with the ONNX select
-    /// model; nil or false keeps ONNX Runtime. Optional so that earlier reports still decode.
+    /// With the fast descriptor head, keypoints are selected in C++ (nil or true, the default) or with the
+    /// ONNX select model (false, needs ONNX Runtime). Optional so that earlier reports still decode.
     public var nativeKeypointSelection: Bool?
     public var matcherBackend: LearnedBackend = .coreMLGPU
     /// "fp16" (fastest, GPU or Neural Engine) or "fp32" (same matches as the ONNX matcher).

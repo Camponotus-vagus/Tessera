@@ -13,7 +13,7 @@ struct DescriptorHeadTests {
     }
 
     @Test("C++ descriptor head on feature levels equals the ONNX head on the full map",
-          .enabled(if: models != nil))
+          .enabled(if: LearnedModelSet.onnxAvailable && models != nil))
     func fastHeadMatchesONNXHead() async throws {
         let models = try #require(Self.models)
         let directory = try Synthetic.temporaryDirectory()

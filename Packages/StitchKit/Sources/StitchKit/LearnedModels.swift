@@ -62,7 +62,10 @@ public struct LearnedModelSet: Sendable, Hashable, Codable {
 
     var descriptorHead: URL { directory.appendingPathComponent("aliked_descriptor_head.bin") }
 
-    var hasLevelsExtractor: Bool { hasLevelsExtractor(nativeSelection: false) }
+    var hasLevelsExtractor: Bool { hasLevelsExtractor(nativeSelection: true) }
+
+    /// Whether this build links ONNX Runtime (the ONNXRuntime package trait).
+    static var onnxAvailable: Bool { sc_onnx_available() != 0 }
 
     /// Keypoint selection in C++ needs no select model.
     func hasLevelsExtractor(nativeSelection: Bool) -> Bool {
@@ -93,11 +96,12 @@ public struct LearnedModelSet: Sendable, Hashable, Codable {
 
     var hasONNXMatcher: Bool { FileManager.default.fileExists(atPath: onnxMatcher.path) }
 
-    /// At least one complete extractor and one matcher, whatever the backend.
+    /// At least one complete extractor and one matcher that this build can run.
     public var isUsable: Bool {
-        let extractor = hasLevelsExtractor || Self.precisions.contains { hasSplitExtractor(precision: $0) }
-            || hasONNXExtractor
-        let matcher = hasONNXMatcher || Self.precisions.contains { hasCoreMLMatcher(precision: $0) }
+        let onnx = Self.onnxAvailable
+        let extractor = hasLevelsExtractor
+            || onnx && (Self.precisions.contains { hasSplitExtractor(precision: $0) } || hasONNXExtractor)
+        let matcher = Self.precisions.contains { hasCoreMLMatcher(precision: $0) } || onnx && hasONNXMatcher
         return extractor && matcher
     }
 
@@ -410,11 +414,13 @@ final class LearnedSession: @unchecked Sendable {
             throw StitchError.engine("Unknown precision \(precision): use fp16 or fp32")
         }
         let units = configuration.extractorBackend.computeUnits
-        let nativeSelection = configuration.nativeKeypointSelection == true
+        let onnx = LearnedModelSet.onnxAvailable
+        let nativeSelection = configuration.nativeKeypointSelection ?? true || !onnx
         let useLevels = units != nil && configuration.fastDescriptorHead &&
             models.hasLevelsExtractor(nativeSelection: nativeSelection)
-        let useSplit = units != nil && !useLevels && models.hasSplitExtractor(precision: configuration.extractorPrecision)
-        guard useLevels || useSplit || models.hasONNXExtractor else {
+        let useSplit = onnx && units != nil && !useLevels
+            && models.hasSplitExtractor(precision: configuration.extractorPrecision)
+        guard useLevels || useSplit || onnx && models.hasONNXExtractor else {
             throw StitchError.engine("No RaCo-ALIKED extractor for this configuration in \(models.directory.path)")
         }
         head = useLevels ? try DescriptorHead(models.descriptorHead) : nil
@@ -448,7 +454,7 @@ final class LearnedSession: @unchecked Sendable {
             onnxMatcher = nil
             matcherName = "Core ML \(configuration.matcherPrecision) \(configuration.matcherBackend.rawValue)"
         } else {
-            guard models.hasONNXMatcher else {
+            guard onnx && models.hasONNXMatcher else {
                 throw StitchError.engine("No LightGlue matcher for this configuration in \(models.directory.path)")
             }
             onnxMatcher = try ONNXModel(models.onnxMatcher, execution: SC_EXECUTION_CPU, lowMemory: lowMemory)
@@ -462,7 +468,7 @@ final class LearnedSession: @unchecked Sendable {
         "\(models.directory.path)|\(models.keypoints)|\(configuration.extractorBackend.rawValue)|" +
             "\(configuration.extractorPrecision)|\(configuration.matcherBackend.rawValue)|" +
             "\(configuration.matcherPrecision)|\(configuration.lightGlueLowMemory)|\(configuration.fastDescriptorHead)|" +
-            "\(configuration.nativeKeypointSelection == true)"
+            "\(configuration.nativeKeypointSelection ?? true)"
     }
 
     /// Keypoints (canvas pixels) and descriptors for one photo drawn into a fixed-size canvas.

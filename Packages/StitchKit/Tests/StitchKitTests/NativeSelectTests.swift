@@ -338,7 +338,7 @@ struct NativeSelectTests {
     }
 
     @Test("Same keypoints as the ONNX select model on the Core ML maps of real photos",
-          .enabled(if: models != nil && !photoSets.isEmpty))
+          .enabled(if: LearnedModelSet.onnxAvailable && models != nil && !photoSets.isEmpty))
     func matchesONNXOnRealPhotos() async throws {
         let models = try #require(Self.models)
         let k = models.keypoints
@@ -465,7 +465,8 @@ struct NativeSelectTests {
         print(lines.joined(separator: "\n"))
     }
 
-    @Test("LearnedSession selects in C++ when asked", .enabled(if: models != nil))
+    @Test("LearnedSession selects in C++ unless asked for the ONNX model",
+          .enabled(if: LearnedModelSet.onnxAvailable && models != nil))
     func sessionSwitch() async throws {
         let models = try #require(Self.models)
         let directory = try Synthetic.temporaryDirectory()
@@ -479,8 +480,9 @@ struct NativeSelectTests {
         var onnx = PipelineConfiguration()
         onnx.learnedModels = models
         onnx.extractorBackend = .coreMLGPU
+        onnx.nativeKeypointSelection = false
         var native = onnx
-        native.nativeKeypointSelection = true
+        native.nativeKeypointSelection = nil
         let a = try await LearnedSession(models: models, configuration: onnx)
         let b = try await LearnedSession(models: models, configuration: native)
         #expect(a.key != b.key)
