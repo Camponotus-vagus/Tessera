@@ -124,7 +124,7 @@ class Sparse(torch.nn.Module):
     def __init__(self, extractor: RaCoALIKED) -> None:
         super().__init__()
         if extractor.ranker_mode is not RankerMode.boundary:
-            raise ValueError("the split mirrors the boundary ranker used for K = 1024...2048")
+            raise ValueError("the split mirrors the boundary ranker used for K = 1024...2560")
         self.raco = extractor.raco
         self.aliked = extractor.aliked
         self.num_keypoints = extractor.raco.num_keypoints

@@ -371,6 +371,13 @@ final class DiagnosticSession {
 
     private func reloadModels() {
         configuration.learnedModels = LearnedModelSet.standard(keypoints: configuration.learnedModels?.keypoints ?? 2048)
+        // A choice the new set cannot run (an ONNX matcher, fp32) goes back to the defaults.
+        if let models = configuration.learnedModels, !models.supports(configuration) {
+            let defaults = PipelineConfiguration()
+            configuration.extractorBackend = defaults.extractorBackend
+            configuration.matcherBackend = defaults.matcherBackend
+            configuration.matcherPrecision = defaults.matcherPrecision
+        }
     }
 
     // MARK: - Images
