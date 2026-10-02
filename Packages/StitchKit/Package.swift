@@ -2,8 +2,8 @@
 import PackageDescription
 
 // OpenCV is a minimal static build in Vendor/opencv (tools/build-opencv.sh). ONNX Runtime comes from
-// Homebrew and is optional: it only runs the alternative ONNX extractors and matcher, so the release
-// app is built without it (swift build --disable-default-traits).
+// Homebrew and is optional: it only runs the alternative ONNX extractors and matcher and the comparison
+// tests (swift build --traits ONNXRuntime). The app does not need it.
 let vendor = Context.packageDirectory + "/../../Vendor/opencv"
 let brew = "/opt/homebrew/opt/onnxruntime"
 let opencvLibraries = ["opencv_stitching", "opencv_features", "opencv_geometry", "opencv_flann", "opencv_imgproc",
@@ -19,7 +19,6 @@ let package = Package(
     ],
     traits: [
         .trait(name: "ONNXRuntime", description: "Link ONNX Runtime for the ONNX extractors and matcher"),
-        .default(enabledTraits: ["ONNXRuntime"]),
     ],
     targets: [
         .target(

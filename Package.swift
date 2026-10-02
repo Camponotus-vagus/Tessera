@@ -6,8 +6,7 @@ let package = Package(
     name: "Tessera",
     platforms: [.macOS(.v15)],
     traits: [
-        .trait(name: "ONNXRuntime", description: "Build StitchKit with ONNX Runtime (development builds)"),
-        .default(enabledTraits: ["ONNXRuntime"]),
+        .trait(name: "ONNXRuntime", description: "Build StitchKit with ONNX Runtime (comparisons only)"),
     ],
     dependencies: [
         .package(path: "Packages/StitchKit", traits: [

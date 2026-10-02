@@ -1,14 +1,14 @@
 #!/bin/zsh
 # Builds Tessera with SwiftPM and wraps it into an ad-hoc signed .app in build/. The learned models are not
 # bundled: the app downloads them on request from the release in tools/models.json, copied in as
-# Resources/models.json. TESSERA_TRAITS=none builds without ONNX Runtime, as the released app is.
+# Resources/models.json. TESSERA_TRAITS=onnx links ONNX Runtime from Homebrew (not needed by the app).
 set -euo pipefail
 root="${0:A:h:h}"
 configuration="${1:-release}"
 version="${TESSERA_VERSION:-0.1.0}"
 cd "$root"
 traits=()
-[ "${TESSERA_TRAITS:-}" = none ] && traits=(--disable-default-traits)
+[ "${TESSERA_TRAITS:-}" = onnx ] && traits=(--traits ONNXRuntime)
 swift build -c "$configuration" --product Tessera "${traits[@]}"
 binary="$(swift build -c "$configuration" --show-bin-path "${traits[@]}")/Tessera"
 app="$root/build/Tessera.app"
