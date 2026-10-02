@@ -22,7 +22,7 @@ Swift never sees C++ types. Everything crosses the boundary as flat float arrays
 - **RootSIFT.** OpenCV SIFT on a downscaled gray image (1.5 MP by default, up to 6000 keypoints), descriptors L1-normalised and square-rooted. Coordinates are scaled back to the original image.
 - **RaCo-ALIKED.** Each photo is fitted, without distortion, into a fixed 1024 x 768 (or 768 x 1024) canvas. The network is split in three:
   - Core ML (GPU, fp32): RaCo's score map and ranker map, and ALIKED's four feature levels at their own resolutions (1, 1/2, 1/8, 1/32).
-  - ONNX Runtime (CPU): non-maximum suppression, top-k, sub-pixel refinement and the boundary ranker, giving 2048 keypoints.
+  - ONNX Runtime (CPU): non-maximum suppression, top-k, sub-pixel refinement and the boundary ranker, giving 2048 keypoints. `select.cpp` does the same in C++ when `nativeKeypointSelection` is set (off by default for now).
   - C++ (`descriptor_head.cpp`): ALIKED's sparse deformable descriptor head. It rebuilds the upsampled, L2-normalised feature vector only at the 9 patch pixels and 4 x 16 deformable sample corners of each keypoint, then runs the head's layers as matrix products. Building the full-resolution 128-channel map instead would cost 400 MB per photo.
   Up to three photos are in flight at once.
 

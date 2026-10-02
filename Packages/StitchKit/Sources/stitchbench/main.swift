@@ -18,7 +18,7 @@ func usage(_ problem: String? = nil) -> Never {
     usage: stitchbench [--mode auto|rotation|plane|document] [--source sift|lightglue|both]
                        [--models dir] [--keypoints 2048] [--extractor onnx|gpu|ane|all] [--extractor-precision fp32|fp16]
                        [--matcher onnx|gpu|ane|all] [--precision fp16|fp32] [--sift-mp 1.5] [--all-pairs]
-                       [--low-memory] [--repeat N] [--out dir] images...
+                       [--low-memory] [--native-select] [--repeat N] [--out dir] images...
     """)
     exit(2)
 }
@@ -78,6 +78,7 @@ func parse() -> Options {
         case "--sift-mp": options.configuration.siftMegapixels = number(argument, minimum: 0.01)
         case "--all-pairs": options.configuration.pairSelection = .all
         case "--low-memory": options.configuration.lightGlueLowMemory = true
+        case "--native-select": options.configuration.nativeKeypointSelection = true
         case "--repeat": options.repeats = number(argument, minimum: 1)
         case "--out": options.output = URL(fileURLWithPath: value(argument), isDirectory: true)
         case "-h", "--help": usage()

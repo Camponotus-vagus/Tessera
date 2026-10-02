@@ -51,7 +51,7 @@ public struct LearnedModelSet: Sendable, Hashable, Codable {
     }
 
     /// Faster split: dense maps and ALIKED's feature levels on Core ML, keypoint selection on ONNX
-    /// Runtime, descriptor head in C++.
+    /// Runtime (or in C++), descriptor head in C++.
     func levels(for canvas: PixelSize) -> URL {
         directory.appendingPathComponent("raco_aliked_levels_\(canvas.height)x\(canvas.width)_fp32.mlpackage")
     }
@@ -62,10 +62,13 @@ public struct LearnedModelSet: Sendable, Hashable, Codable {
 
     var descriptorHead: URL { directory.appendingPathComponent("aliked_descriptor_head.bin") }
 
-    var hasLevelsExtractor: Bool {
+    var hasLevelsExtractor: Bool { hasLevelsExtractor(nativeSelection: false) }
+
+    /// Keypoint selection in C++ needs no select model.
+    func hasLevelsExtractor(nativeSelection: Bool) -> Bool {
         FileManager.default.fileExists(atPath: descriptorHead.path) && [Self.landscape, Self.portrait].allSatisfy {
             FileManager.default.fileExists(atPath: levels(for: $0).path) &&
-                FileManager.default.fileExists(atPath: select(for: $0).path)
+                (nativeSelection || FileManager.default.fileExists(atPath: select(for: $0).path))
         }
     }
 
@@ -409,7 +412,9 @@ final class LearnedSession: @unchecked Sendable {
             throw StitchError.engine("Unknown precision \(precision): use fp16 or fp32")
         }
         let units = configuration.extractorBackend.computeUnits
-        let useLevels = units != nil && configuration.fastDescriptorHead && models.hasLevelsExtractor
+        let nativeSelection = configuration.nativeKeypointSelection == true
+        let useLevels = units != nil && configuration.fastDescriptorHead &&
+            models.hasLevelsExtractor(nativeSelection: nativeSelection)
         let useSplit = units != nil && !useLevels && models.hasSplitExtractor(precision: configuration.extractorPrecision)
         guard useLevels || useSplit || models.hasONNXExtractor else {
             throw StitchError.engine("No RaCo-ALIKED extractor for this configuration in \(models.directory.path)")
@@ -419,7 +424,8 @@ final class LearnedSession: @unchecked Sendable {
             if useLevels, let units {
                 extractors[canvas] = Extractor(
                     dense: try await CoreMLDense(package: models.levels(for: canvas), computeUnits: units),
-                    select: try ONNXModel(models.select(for: canvas), execution: SC_EXECUTION_CPU, lowMemory: lowMemory)
+                    select: nativeSelection ? nil
+                        : try ONNXModel(models.select(for: canvas), execution: SC_EXECUTION_CPU, lowMemory: lowMemory)
                 )
             } else if useSplit, let units {
                 extractors[canvas] = Extractor(
@@ -433,7 +439,8 @@ final class LearnedSession: @unchecked Sendable {
                 )
             }
         }
-        let extractorName = useLevels ? "levels + select + C++ head (Core ML \(configuration.extractorBackend.rawValue))"
+        let selectName = nativeSelection ? "C++ select" : "select"
+        let extractorName = useLevels ? "levels + \(selectName) + C++ head (Core ML \(configuration.extractorBackend.rawValue))"
             : useSplit ? "dense \(configuration.extractorPrecision) + sparse (Core ML \(configuration.extractorBackend.rawValue))"
             : "ONNX Runtime CPU"
         let package = models.coreMLMatcher(precision: configuration.matcherPrecision)
@@ -456,7 +463,8 @@ final class LearnedSession: @unchecked Sendable {
     static func key(_ models: LearnedModelSet, _ configuration: PipelineConfiguration) -> String {
         "\(models.directory.path)|\(models.keypoints)|\(configuration.extractorBackend.rawValue)|" +
             "\(configuration.extractorPrecision)|\(configuration.matcherBackend.rawValue)|" +
-            "\(configuration.matcherPrecision)|\(configuration.lightGlueLowMemory)|\(configuration.fastDescriptorHead)"
+            "\(configuration.matcherPrecision)|\(configuration.lightGlueLowMemory)|\(configuration.fastDescriptorHead)|" +
+            "\(configuration.nativeKeypointSelection == true)"
     }
 
     /// Keypoints (canvas pixels) and descriptors for one photo drawn into a fixed-size canvas.
@@ -466,7 +474,7 @@ final class LearnedSession: @unchecked Sendable {
         var message = [CChar](repeating: 0, count: 1024)
         defer { sc_extraction_free(&result) }
         let status: Int32
-        if let dense = extractor.dense, let select = extractor.select, let head {
+        if let dense = extractor.dense, let head {
             // One Core ML prediction at a time; other photos go through the CPU stages meanwhile.
             let maps = try gpu.withLock {
                 try dense.run(planar, canvas: canvas, outputs: ["logits", "ranker", "level1", "level2", "level3", "level4"])
@@ -476,12 +484,23 @@ final class LearnedSession: @unchecked Sendable {
             guard maps[2...5].allSatisfy({ $0.shape.count == 4 }) else {
                 throw StitchError.engine("Core ML feature levels have the wrong rank: wrong model file?")
             }
-            status = try withContiguousFloats(Array(maps[0...1])) { pointers in
-                sc_select_keypoints(select.pointer, pointers[0], pointers[1], Int32(canvas.width), Int32(canvas.height),
-                                    &result, &message, message.count)
+            var keypoints: [Float]
+            if let select = extractor.select {
+                status = try withContiguousFloats(Array(maps[0...1])) { pointers in
+                    sc_select_keypoints(select.pointer, pointers[0], pointers[1], Int32(canvas.width), Int32(canvas.height),
+                                        &result, &message, message.count)
+                }
+                guard status == 0 else { throw StitchError.engine(errorText(message)) }
+                keypoints = Array(UnsafeBufferPointer(start: result.keypoints, count: Int(result.keypoint_count) * 2))
+            } else {
+                keypoints = [Float](repeating: 0, count: models.keypoints * 2)
+                status = try withContiguousFloats(Array(maps[0...1])) { pointers in
+                    sc_select_keypoints_native(pointers[0], pointers[1], Int32(canvas.width), Int32(canvas.height),
+                                               Int32(models.keypoints), &keypoints, &message, message.count)
+                }
+                guard status == 0 else { throw StitchError.engine(errorText(message)) }
             }
-            guard status == 0 else { throw StitchError.engine(errorText(message)) }
-            let count = Int(result.keypoint_count)
+            let count = keypoints.count / 2
             var descriptors = [Float](repeating: 0, count: count * head.dimensions)
             let levels = Array(maps[2...5])
             let widths = levels.map { Int32($0.shape[3].intValue) }, heights = levels.map { Int32($0.shape[2].intValue) }
@@ -489,11 +508,11 @@ final class LearnedSession: @unchecked Sendable {
                 pointers.map { Optional($0) }.withUnsafeBufferPointer { levelPointers in
                     sc_describe(head.pointer, levelPointers.baseAddress, widths, heights, Int32(levels.count),
                                 Int32(levels[0].shape[1].intValue), Int32(canvas.width), Int32(canvas.height),
-                                result.keypoints, Int32(count), &descriptors, &message, message.count)
+                                keypoints, Int32(count), &descriptors, &message, message.count)
                 }
             }
             guard described == 0 else { throw StitchError.engine(errorText(message)) }
-            return (Array(UnsafeBufferPointer(start: result.keypoints, count: count * 2)), descriptors, head.dimensions)
+            return (keypoints, descriptors, head.dimensions)
         } else if let dense = extractor.dense, let sparse = extractor.sparse {
             let maps = try gpu.withLock { try dense.run(planar, canvas: canvas, outputs: ["logits", "ranker", "features"]) }
             try expectElements(maps[0], canvas.width * canvas.height, "logits")
