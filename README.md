@@ -36,12 +36,11 @@ Hundreds of near-identical labels in a box of pinned ants. LightGlue still finds
 brew install opencv onnxruntime
 git clone https://github.com/Camponotus-vagus/Tessera.git
 cd Tessera
-tools/fetch-models.sh        # downloads the Core ML and ONNX models (about 30 MB) into Models/
-tools/make-app.sh            # builds build/Tessera.app, with the models inside
+tools/make-app.sh            # builds build/Tessera.app
 open build/Tessera.app
 ```
 
-The models can also be regenerated from the original PyTorch weights: see [tools/export/README.md](tools/export/README.md).
+The app does not include the learned models. RootSIFT works without them; RaCo-ALIKED + LightGlue needs them, and the app offers to download them (about 28 MB, once) from the empty window or from the Matcher settings. It fetches the release listed in `tools/models.json`, checks its SHA-256 and installs it in `~/Library/Application Support/Tessera/Models`, where the settings can also show or remove it. From the command line, `stitchbench --download-models` installs the same files in the same place, and `tools/fetch-models.sh` unpacks them into `Models/` of the checkout, which the tests and `stitchbench` also find. The models can be regenerated from the original PyTorch weights too: see [tools/export/README.md](tools/export/README.md).
 
 `stitchbench`, a command-line driver of the same engine, prints a text summary and can write the JSON report and one PNG per pair:
 

@@ -7,6 +7,9 @@ import StitchKit
 
 struct Options {
     var configuration = PipelineConfiguration()
+    var models: URL?
+    var keypoints = 2048
+    var downloadModels = false
     var output: URL?
     var repeats = 1
     var files: [URL] = []
@@ -19,6 +22,7 @@ func usage(_ problem: String? = nil) -> Never {
                        [--models dir] [--keypoints 2048] [--extractor onnx|gpu|ane|all] [--extractor-precision fp32|fp16]
                        [--matcher onnx|gpu|ane|all] [--precision fp16|fp32] [--sift-mp 1.5] [--all-pairs]
                        [--low-memory] [--repeat N] [--out dir] images...
+           stitchbench --download-models [images...]
     """)
     exit(2)
 }
@@ -44,8 +48,6 @@ func precision(_ name: String) -> String {
 
 func parse() -> Options {
     var options = Options()
-    var directory: URL?
-    var keypoints = 2048
     var arguments = CommandLine.arguments.dropFirst()
     func value(_ option: String) -> String {
         guard let next = arguments.popFirst() else { usage("\(option) needs a value") }
@@ -69,8 +71,9 @@ func parse() -> Options {
             case "both": options.configuration.sources = [.rootSIFT, .racoLightGlue]
             case let other: usage("unknown source \(other)")
             }
-        case "--models": directory = URL(fileURLWithPath: value(argument), isDirectory: true)
-        case "--keypoints": keypoints = number(argument, minimum: 1)
+        case "--models": options.models = URL(fileURLWithPath: value(argument), isDirectory: true)
+        case "--keypoints": options.keypoints = number(argument, minimum: 1)
+        case "--download-models": options.downloadModels = true
         case "--matcher": options.configuration.matcherBackend = backend(value(argument))
         case "--precision": options.configuration.matcherPrecision = precision(value(argument))
         case "--extractor": options.configuration.extractorBackend = backend(value(argument))
@@ -85,9 +88,17 @@ func parse() -> Options {
         default: options.files.append(URL(fileURLWithPath: argument))
         }
     }
-    if options.files.count < 2 { usage("at least two images are needed") }
-    options.configuration.learnedModels = directory.map { LearnedModelSet(directory: $0, keypoints: keypoints) }
-        ?? LearnedModelSet.standard(keypoints: keypoints)
+    // --download-models alone only installs the models.
+    if options.files.count < 2, !(options.downloadModels && options.files.isEmpty) {
+        usage("at least two images are needed")
+    }
+    return options
+}
+
+/// Picks the learned models, after any download: --models, or the first usable set in the search paths.
+func resolveModels(_ options: inout Options) {
+    options.configuration.learnedModels = options.models.map { LearnedModelSet(directory: $0, keypoints: options.keypoints) }
+        ?? LearnedModelSet.standard(keypoints: options.keypoints)
     if let models = options.configuration.learnedModels, !models.isUsable {
         usage("no usable models in \(models.directory.path)")
     }
@@ -95,11 +106,42 @@ func parse() -> Options {
     if options.configuration.learnedModels == nil, options.configuration.sources.contains(.racoLightGlue) {
         options.configuration.sources.removeAll { $0 == .racoLightGlue }
         guard !options.configuration.sources.isEmpty else {
-            usage("no RaCo-ALIKED + LightGlue models found; run tools/fetch-models.sh or pass --models")
+            usage("no RaCo-ALIKED + LightGlue models found; run stitchbench --download-models or pass --models")
         }
         warn("no RaCo-ALIKED + LightGlue models found, running RootSIFT only")
     }
-    return options
+}
+
+/// Installs the default models in Application Support, as the app does, with progress on standard error.
+func downloadModels() async throws {
+    let installer = ModelInstaller()
+    guard let manifest = installer.manifest else { throw ModelInstallError.noManifest }
+    FileHandle.standardError.write(Data("downloading \(manifest.url.absoluteString)\n".utf8))
+    let terminal = isatty(STDERR_FILENO) == 1
+    // On a terminal each report overwrites the previous one, and the line is ended before anything else.
+    func endLine() { if terminal { FileHandle.standardError.write(Data("\n".utf8)) } }
+    let models: LearnedModelSet
+    do {
+        models = try await installer.install { progress in
+            let line: String? = switch progress.stage {
+            case .downloading:
+                if progress.received > 0, terminal || progress.received == progress.expected {
+                    "\(progress.received.formatted(.byteCount(style: .file)))" +
+                        (progress.expected.map { " of \($0.formatted(.byteCount(style: .file)))" } ?? "")
+                } else {
+                    nil
+                }
+            case .verifying: "checking SHA-256"
+            case .extracting: "extracting"
+            }
+            if let line { FileHandle.standardError.write(Data((terminal ? "\r\u{1B}[K\(line)" : "\(line)\n").utf8)) }
+        }
+    } catch {
+        endLine()
+        throw error
+    }
+    endLine()
+    print("models ready in \(models.directory.path)")
 }
 
 func peakResidentMegabytes() -> Double {
@@ -111,7 +153,12 @@ func peakResidentMegabytes() -> Double {
 func format(_ value: Double, _ digits: Int = 2) -> String { String(format: "%.\(digits)f", value) }
 
 func run() async throws {
-    let options = parse()
+    var options = parse()
+    if options.downloadModels {
+        try await downloadModels()
+        if options.files.isEmpty { return }
+    }
+    resolveModels(&options)
     let engine = StitchEngine()
     var report: MatchReport?
     for run in 1...options.repeats {

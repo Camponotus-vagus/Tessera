@@ -18,6 +18,9 @@ targets:
     platform: macOS
     sources:
       - path: App
+      # Release of the learned models, for the in-app download.
+      - path: tools/models.json
+        buildPhase: resources
     dependencies:
       - package: StitchKit
         product: StitchKit

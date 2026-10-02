@@ -18,6 +18,13 @@ enum DetailTab: Hashable {
     case pair
 }
 
+/// Download of the learned models: nothing going on, in progress (no report yet when nil), or failed.
+enum ModelDownload: Equatable {
+    case idle
+    case running(ModelInstallProgress?)
+    case failed(String)
+}
+
 /// State of one diagnostic session: imported photos, settings, last report and selections.
 @MainActor
 @Observable
@@ -30,6 +37,7 @@ final class DiagnosticSession {
     private(set) var progress: ProgressEvent?
     private(set) var lastDuration: Duration?
     var errorMessage: String?
+    private(set) var modelDownload: ModelDownload = .idle
 
     var tab: DetailTab = .graph
     var selectedImage: Int?
@@ -42,6 +50,7 @@ final class DiagnosticSession {
     /// Bumped by `reset()`: results of work started before it (analysis, thumbnails) are dropped.
     private var generation = 0
     private var analysis: Task<Void, Never>?
+    private var modelTask: Task<Void, Never>?
 
     init() {
         var configuration = PipelineConfiguration()
@@ -50,6 +59,12 @@ final class DiagnosticSession {
     }
 
     var lightGlueAvailable: Bool { configuration.learnedModels != nil }
+
+    /// The models in use are the ones the app downloaded, so the app may remove them.
+    var modelsAreRemovable: Bool {
+        configuration.learnedModels?.directory.resolvingSymlinksInPath().path
+            == ModelInstaller.standardDestination.resolvingSymlinksInPath().path
+    }
 
     /// Matchers that will actually run.
     var activeSources: [FeatureSource] {
@@ -184,6 +199,53 @@ final class DiagnosticSession {
 
     func name(of id: Int) -> String {
         images.first { $0.id == id }?.name ?? "#\(id)"
+    }
+
+    // MARK: - Models
+
+    /// Downloads and installs the learned models, then turns RaCo + LightGlue on.
+    func downloadModels() {
+        guard modelTask == nil else { return }
+        modelDownload = .running(nil)
+        modelTask = Task { await installModels() }
+    }
+
+    func cancelModelDownload() {
+        modelTask?.cancel()
+    }
+
+    private func installModels() async {
+        defer { modelTask = nil }
+        do {
+            try await ModelInstaller().install { [weak self] progress in
+                Task { @MainActor in
+                    guard let self, case .running = self.modelDownload else { return }
+                    self.modelDownload = .running(progress)
+                }
+            }
+            modelDownload = .idle
+            reloadModels()
+            if lightGlueAvailable { setSource(.racoLightGlue, enabled: true) }
+        } catch is CancellationError {
+            modelDownload = .idle
+        } catch {
+            modelDownload = .failed(error.localizedDescription)
+        }
+    }
+
+    func removeModels() {
+        do {
+            try ModelInstaller().remove()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        reloadModels()
+        // Without models RootSIFT is the only matcher left.
+        if !lightGlueAvailable { setSource(.rootSIFT, enabled: true) }
+    }
+
+    private func reloadModels() {
+        configuration.learnedModels = LearnedModelSet.standard(keypoints: configuration.learnedModels?.keypoints ?? 2048)
     }
 
     // MARK: - Images

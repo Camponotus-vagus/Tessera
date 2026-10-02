@@ -26,8 +26,10 @@ struct InspectorView: View {
                     set: { session.setSource(.racoLightGlue, enabled: $0) }
                 ))
                 .disabled(!session.lightGlueAvailable || session.activeSources == [.racoLightGlue])
-                if !session.lightGlueAvailable {
-                    Text("Models not found: see the README.").font(.caption).foregroundStyle(.orange)
+                if session.lightGlueAvailable {
+                    InstalledModelsView()
+                } else {
+                    ModelDownloadView()
                 }
                 Picker("Extractor", selection: $session.configuration.extractorBackend) {
                     ForEach(LearnedBackend.allCases, id: \.self) { Text($0.label).tag($0) }

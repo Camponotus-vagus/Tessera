@@ -96,6 +96,7 @@ struct ContentView: View {
 }
 
 private struct EmptyState: View {
+    @Environment(DiagnosticSession.self) private var session
     @Binding var importing: Bool
 
     var body: some View {
@@ -104,8 +105,13 @@ private struct EmptyState: View {
         } description: {
             Text("Drop the photos to join here, or import them.")
         } actions: {
-            Button("Import Photos…") { importing = true }
-                .buttonStyle(.borderedProminent)
+            VStack(spacing: 16) {
+                Button("Import Photos…") { importing = true }
+                    .buttonStyle(.borderedProminent)
+                if !session.lightGlueAvailable {
+                    ModelDownloadView(compact: true)
+                }
+            }
         }
     }
 }
