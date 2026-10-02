@@ -30,7 +30,8 @@ done < <(find "$app" -type f -perm -u+x -exec sh -c 'file -b "$1" | grep -q Mach
 [ "$failed" = 0 ] || exit 1
 codesign --verify --deep --strict "$app"
 
-ditto -c -k --keepParent "$app" "$out/Tessera-$version.zip"
+# No extended attributes: as AppleDouble files they break the signature when unpacked with unzip.
+ditto -c -k --norsrc --noextattr --noacl --keepParent "$app" "$out/Tessera-$version.zip"
 staging="$(mktemp -d)"
 trap 'rm -rf "$staging"' EXIT
 cp -R "$app" "$staging/"

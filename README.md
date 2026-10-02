@@ -45,7 +45,7 @@ If some photos are left out, the Graph view (⌘1) says why for each of them. Cl
 The settings inspector has, among others:
 
 - Mode: Automatic, Rotation for a camera that turns on the spot, Plane for tiles of a flat subject (microscope slides, insect drawers), or Document for a flat original shot from different angles.
-- Projection: Flat for planar mosaics; Rectilinear, Cylindrical or Spherical for rotation panoramas. Automatic picks rectilinear for narrow fields of view, cylindrical for wide ones and spherical when the panorama is also tall.
+- Projection, for rotation panoramas: Rectilinear, Cylindrical or Spherical. Automatic picks rectilinear for narrow fields of view, cylindrical for wide ones and spherical when the panorama is also tall. Planar mosaics and documents are always flat.
 - Size: full resolution, half or a quarter.
 - Pixels: Blended across seams (seams follow the edges of objects and are blended over a wide band), or Original values, where each pixel comes from a single photo. For measurements, set Exposure to Unchanged under Advanced as well, so that the values stay those of the photo.
 
@@ -75,16 +75,16 @@ tools/make-app.sh
 open build/Tessera.app
 ```
 
-`tools/build-opencv.sh` downloads the OpenCV 5.0.0 source, checks its SHA-256 and builds the six modules Tessera uses as static libraries in `Vendor/opencv`, which takes a few minutes. The app then depends on nothing outside macOS. `tools/make-release.sh` builds the zip and the DMG of a release, and `swift test` in `Packages/StitchKit` runs the tests (with `tools/fetch-models.sh` first, so that the learned matcher is tested too).
+`tools/build-opencv.sh` downloads the OpenCV 5.0.0 source, checks its SHA-256 and builds the six modules Tessera uses as static libraries in `Vendor/opencv`, which takes a few minutes. The app then depends on nothing outside macOS. `tools/make-release.sh` builds the zip and the DMG of a release, and `swift test` in `Packages/StitchKit` runs the tests.
 
-ONNX Runtime is optional. With `brew install onnxruntime` and `TESSERA_TRAITS=onnx tools/make-app.sh` (or `swift build --traits ONNXRuntime`), the learned models can also run on the CPU, and `stitchbench --onnx-select` compares the keypoint selection with the original ONNX model. The models can be regenerated from the PyTorch weights with the scripts in [tools/export](tools/export/README.md).
+ONNX Runtime is optional. With `brew install onnxruntime` and `TESSERA_TRAITS=onnx tools/make-app.sh` (or `swift build --traits ONNXRuntime`), the learned models can also run on the CPU, and `stitchbench --onnx-select` uses the original ONNX keypoint selection instead of the C++ one. The models can be regenerated from the PyTorch weights with the scripts in [tools/export](tools/export/README.md).
 
 ## How it works
 
 1. Features: RootSIFT runs on the CPU while RaCo-ALIKED runs on the GPU. The learned extractor is split in three: Core ML computes RaCo's score and ranker maps and ALIKED's feature levels, C++ selects the keypoints, and a small C++ routine evaluates ALIKED's descriptor head only at the pixels it needs.
 2. Candidate pairs: with more than four photos, a mutual-nearest-neighbour count between the best 512 descriptors of each photo ranks the pairs, and Tessera matches consecutive shots, the best neighbours of each photo and a spanning tree, then retries promising pairs between groups that remain apart.
 3. Matching: RootSIFT with Lowe's ratio test and a mutual check, computed as one matrix product with Accelerate; LightGlue on Core ML.
-4. Verification: MAGSAC++ (OpenCV USAC) for each candidate motion model, then an a-contrario test (number of false alarms), a check that the inliers cover more than a strip, and a plausibility check on the transform.
+4. Verification: RANSAC for translation and similarity and MAGSAC++ (OpenCV USAC) for affine and homography, then an a-contrario test (number of false alarms), a check that the inliers cover more than a strip, and a plausibility check on the transform.
 5. Graph: connected groups of verified pairs, with a reason for every photo left out.
 6. Global alignment: planar mosaics are solved by weighted least squares on the inliers of all verified pairs (translation, similarity or affine), or by Levenberg-Marquardt for homographies. Rotation panoramas use OpenCV's bundle adjuster, with the focal length taken from the EXIF data when present, and wave correction to level the horizon. Pairs that disagree with the rest are dropped while the group stays connected.
 7. Compositing: each photo is warped to the chosen projection, exposure is compensated per photo and colour channel, a graph cut places the seams around objects, and multi-band blending hides them. The result keeps 16 bits per channel, and its largest rectangle without empty corners is found exactly up to 60 megapixels.
