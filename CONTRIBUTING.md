@@ -5,11 +5,14 @@ Bug reports with photos that break the analysis are the most useful contribution
 ## Development
 
 ```bash
-brew install opencv onnxruntime
+brew install cmake ninja
+tools/build-opencv.sh
 tools/fetch-models.sh
 cd Packages/StitchKit && swift test
 cd ../.. && tools/make-app.sh
 ```
+
+For the ONNX Runtime backends, `brew install onnxruntime` and build with `--traits ONNXRuntime` (or `TESSERA_TRAITS=onnx tools/make-app.sh`).
 
 - Swift 6 with strict concurrency; the app is SwiftUI.
 - C++ stays behind the C API in `Packages/StitchKit/Sources/CStitchCore/include/stitchcore.h`; Swift owns every native handle.

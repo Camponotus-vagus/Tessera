@@ -2,13 +2,13 @@ name: Tessera
 options:
   bundleIdPrefix: io.github.camponotus-vagus
   deploymentTarget:
-    macOS: "27.0"
+    macOS: "15.0"
   createIntermediateGroups: true
 settings:
   base:
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
-    MACOSX_DEPLOYMENT_TARGET: "27.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
 packages:
   StitchKit:
     path: Packages/StitchKit
@@ -34,8 +34,8 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Tessera
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.photography
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
-        # Local development build: ad-hoc signed, no sandbox, no hardened runtime,
-        # so the Homebrew OpenCV and ONNX Runtime dylibs load from /opt/homebrew.
+        # Local development build: ad-hoc signed, no sandbox, no hardened runtime.
+        # OpenCV is linked statically from Vendor/opencv (tools/build-opencv.sh).
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
         DEVELOPMENT_TEAM: ""

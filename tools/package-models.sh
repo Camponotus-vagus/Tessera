@@ -15,6 +15,12 @@ archive="$root/build/tessera-$version.zip"
 mkdir -p "$root/build"
 rm -f "$archive"
 zip -qry "$archive" "${files[@]}"
+# The licenses of the weights the models are converted from travel with them.
+notices=$(mktemp -d)
+cp "$root/Licenses/models.md" "$notices/LICENSES.md"
+cp "$root/Licenses/Apache-2.0.txt" "$notices/"
+(cd "$notices" && zip -qX "$archive" LICENSES.md Apache-2.0.txt)
+rm -rf "$notices"
 digest=$(shasum -a 256 "$archive" | cut -d' ' -f1)
 size=$(stat -f%z "$archive")
 /usr/bin/python3 - "$root/tools/models.json" "$version" "$digest" "$size" <<'PY'

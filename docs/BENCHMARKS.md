@@ -6,6 +6,8 @@ Measured on a MacBook Air M5 (32 GB, macOS 27), release build of `stitchbench`. 
 
 - **Drawer**: six 4032 x 3024 photos of an insect drawer, shot handheld with an iPhone. Nearly planar subject, many nearly identical labels, glossy background with reflections that move with the camera, specimens on pins (parallax).
 - **Grid**: 24 overlapping 1200 x 900 crops of one drawer photo, in a 6 x 4 grid (276 possible pairs).
+- **Box**: four 3024 x 4032 HEIC photos of a box of pinned ants, handheld, hundreds of nearly identical labels.
+- **Newspaper** and **Boat**: OpenCV's stitching test images, four 818 x 1125 pieces of a newspaper page and six 3888 x 2592 photos taken by turning the camera.
 
 ## End to end
 
@@ -17,6 +19,19 @@ Measured on a MacBook Air M5 (32 GB, macOS 27), release build of `stitchbench`. 
 | Grid, RootSIFT + LightGlue, all pairs | 276 | 13.7 s (before the latest extractor changes) |
 
 All photos end up in one group in every case. On the drawer the verified pairs are exactly the five consecutive shots; a false link between two rows of identical labels is rejected by the plausibility and coverage checks. With the capture order removed (files renamed in shuffled order, metadata stripped), the affinity's spanning tree alone recovers the same five pairs.
+
+## Stitching
+
+Default settings (both matchers, automatic mode and projection, full resolution, seams around objects, multi-band blending). Analysis covers features, matching and verification; stitching covers alignment, warping, exposure, seams and blending, without writing the file.
+
+| Set | Model and projection | Panorama | Alignment error | Analysis | Stitching | Peak memory |
+|---|---|---|---|---|---|---|
+| Drawer | homography, flat | 14546 x 3855 (56 MP) | 4.4 px | 1.2 s | 1.9 s | 4.6 GB |
+| Box | homography, flat | 7808 x 4299 (34 MP) | 5.8 px | 1.1 s | 1.8 s | 3.4 GB |
+| Newspaper | similarity, flat | 1794 x 1138 | 0.42 px | 0.9 s | 0.7 s | 1.1 GB |
+| Boat | rotation, cylindrical | 10761 x 2752, cropped to 10726 x 2294 | 6.1 px | 1.1 s | 1.8 s | 3.2 GB |
+
+On the drawer the stitching time splits into 0.02 s of alignment, 0.41 s of seam finding, 1.02 s of warping and exposure and 0.35 s of blending; writing a JPEG takes another 0.26 s. The alignment errors of the drawer and the box come from parallax: the specimens stand on pins above the bottom of the drawer and the photos were taken by hand, so no single plane fits every match. The seams go around the specimens, which hides most of it. The newspaper, a flat page, aligns to under half a pixel.
 
 ## Learned extractor, per photo (1024 x 768)
 
