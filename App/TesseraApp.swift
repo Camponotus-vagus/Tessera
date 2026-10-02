@@ -45,6 +45,12 @@ struct TesseraApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var session = DiagnosticSession()
 
+    init() {
+        // The window is not restorable, so the state AppKit saves holds no window. Restoring it after a crash
+        // or a forced quit would leave the app without its window: never restore.
+        UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true])
+    }
+
     var body: some Scene {
         Window("Tessera", id: "main") {
             ContentView()
