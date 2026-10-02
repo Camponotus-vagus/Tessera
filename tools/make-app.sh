@@ -1,19 +1,23 @@
 #!/bin/zsh
 # Builds Tessera with SwiftPM and wraps it into an ad-hoc signed .app in build/. The learned models are not
 # bundled: the app downloads them on request from the release in tools/models.json, copied in as
-# Resources/models.json.
+# Resources/models.json. TESSERA_TRAITS=none builds without ONNX Runtime, as the released app is.
 set -euo pipefail
 root="${0:A:h:h}"
 configuration="${1:-release}"
+version="${TESSERA_VERSION:-0.1.0}"
 cd "$root"
-swift build -c "$configuration" --product Tessera
-binary="$(swift build -c "$configuration" --show-bin-path)/Tessera"
+traits=()
+[ "${TESSERA_TRAITS:-}" = none ] && traits=(--disable-default-traits)
+swift build -c "$configuration" --product Tessera "${traits[@]}"
+binary="$(swift build -c "$configuration" --show-bin-path "${traits[@]}")/Tessera"
 app="$root/build/Tessera.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/Tessera"
 cp -R "$root/App/Resources/"*.lproj "$app/Contents/Resources/"
 cp "$root/tools/models.json" "$app/Contents/Resources/models.json"
+cp "$root/App/Resources/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -22,14 +26,25 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key><string>en</string>
   <key>CFBundleDisplayName</key><string>Tessera</string>
   <key>CFBundleExecutable</key><string>Tessera</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleIdentifier</key><string>io.github.camponotus-vagus.Tessera</string>
   <key>CFBundleName</key><string>Tessera</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
+  <key>CFBundleVersion</key><string>$version</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Image</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key><array><string>public.image</string></array>
+    </dict>
+  </array>
   <key>LSApplicationCategoryType</key><string>public.app-category.photography</string>
-  <key>LSMinimumSystemVersion</key><string>27.0</string>
+  <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Copyright 2026 Francesco Simone Mensa. MIT License.</string>
 </dict>
 </plist>
 PLIST
