@@ -10,7 +10,7 @@ When a stitcher fails, it often says little more than "not enough similarities".
 
 ![Pair view: inliers in green and outliers in red between two neighbouring photos, with the overlap outlined](docs/images/pair-view.jpg)
 
-Hundreds of near-identical labels in a box of pinned ants. LightGlue still finds 207 consistent matches, and the a-contrario test confirms them:
+Hundreds of near-identical labels in a box of pinned ants. LightGlue still finds 211 consistent matches, and the a-contrario test confirms them:
 
 ![Pair view on a box of pinned ants with repeated labels](docs/images/pair-view-repeated-labels.jpg)
 
@@ -47,7 +47,7 @@ The settings inspector has, among others:
 - Mode: Automatic, Rotation for a camera that turns on the spot, Plane for tiles of a flat subject (microscope slides, insect drawers), or Document for a flat original shot from different angles.
 - Projection, for rotation panoramas: Rectilinear, Cylindrical or Spherical. Automatic picks rectilinear for narrow fields of view, cylindrical for wide ones and spherical when the panorama is also tall. Planar mosaics and documents are always flat.
 - Size: full resolution, half or a quarter.
-- Pixels: Blended across seams (seams follow the edges of objects and are blended over a wide band), or Original values, where each pixel comes from a single photo. For measurements, set Exposure to Unchanged under Advanced as well, so that no gain is applied: each pixel is then interpolated from one photo by the warp (bicubic), without gains or blending. Photos that do not share one colour space are converted to Display P3.
+- Pixels: Blended across seams (seams follow the edges of objects and are blended over a wide band), or Original values, where each pixel comes from a single photo. For measurements, set Exposure to Unchanged under Advanced as well, so that no gain is applied: at full resolution each pixel is then interpolated from one photo by the warp (bicubic), without gains or blending (at Half or Quarter size the photos are scaled down first). Photos that do not share one colour space are converted to Display P3.
 
 ## Command line
 

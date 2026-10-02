@@ -81,7 +81,7 @@ public struct PanoramaPixels: Sendable {
     /// hold no transparent pixel, is given).
     func sourceImage(crop: PixelRect? = nil) throws -> CGImage {
         guard pixels.count >= bytesPerRow * height, width > 0, height > 0 else {
-            throw StitchError.engine("Panorama buffer is smaller than its size")
+            throw StitchError.engine(String(localized: "Panorama buffer is smaller than its size"))
         }
         let alpha: CGImageAlphaInfo = opaque || crop != nil ? .noneSkipLast : .last
         let info: CGBitmapInfo = bitsPerComponent == 16
@@ -92,9 +92,9 @@ public struct PanoramaPixels: Sendable {
                                    bitsPerPixel: 4 * bitsPerComponent, bytesPerRow: bytesPerRow, space: colorSpace,
                                    bitmapInfo: info, provider: provider, decode: nil, shouldInterpolate: false,
                                    intent: .defaultIntent)
-        else { throw StitchError.engine("Cannot describe the panorama as an image") }
+        else { throw StitchError.engine(String(localized: "Cannot describe the panorama as an image")) }
         guard let crop else { return source }
-        guard let cropped = source.cropping(to: crop.cgRect) else { throw StitchError.engine("Invalid crop") }
+        guard let cropped = source.cropping(to: crop.cgRect) else { throw StitchError.engine(String(localized: "Invalid crop")) }
         return cropped
     }
 
@@ -120,7 +120,7 @@ public struct PanoramaPixels: Sendable {
             context.fill(rect)
         }
         context.draw(source, in: rect)
-        guard let image = context.makeImage() else { throw StitchError.engine("Cannot convert the panorama") }
+        guard let image = context.makeImage() else { throw StitchError.engine(String(localized: "Cannot convert the panorama")) }
         return image
     }
 
@@ -135,7 +135,7 @@ public struct PanoramaPixels: Sendable {
         else { throw StitchError.engine(String(localized: "Not enough memory for the preview")) }
         context.interpolationQuality = .high
         context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
-        guard let image = context.makeImage() else { throw StitchError.engine("Cannot make the preview") }
+        guard let image = context.makeImage() else { throw StitchError.engine(String(localized: "Cannot make the preview")) }
         return image
     }
 }

@@ -25,6 +25,8 @@ let package = Package(
             name: "CStitchCore",
             cxxSettings: [
                 .unsafeFlags(["-I\(vendor)/include/opencv5"]),
+                // OpenCV's inline headers put __FILE__ into assertion messages: no build-machine paths.
+                .unsafeFlags(["-ffile-prefix-map=\(vendor)/=Vendor/opencv/"]),
                 .unsafeFlags(["-I\(brew)/include"], .when(traits: onnx)),
                 .define("TESSERA_ONNXRUNTIME", .when(traits: onnx)),
             ],

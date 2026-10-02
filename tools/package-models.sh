@@ -33,4 +33,4 @@ PY
 echo "$archive"
 echo "sha256 $digest, $size bytes"
 # A model release must not become the latest one: the README links the app download to releases/latest.
-echo "publish with: gh release create $version $archive --latest=false"
+echo "publish with: gh release create $version ${(q)archive} --latest=false"

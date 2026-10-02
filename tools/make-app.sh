@@ -15,7 +15,7 @@ app="$root/build/Tessera.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/Tessera"
-# Drop the debug map and local symbols: they hold absolute paths of the build machine.
+# Drop the debug map and local symbols, which hold absolute paths of the build machine.
 strip -S -x "$app/Contents/MacOS/Tessera"
 cp -R "$root/App/Resources/"*.lproj "$app/Contents/Resources/"
 cp "$root/tools/models.json" "$app/Contents/Resources/models.json"

@@ -211,9 +211,9 @@
 "Panorama View" = "Vista Panorama";
 
 /* Engine notes and errors (StitchKit) */
-"%@ and %@ were left out of the alignment (%.1f px off the others)" = "%@ e %@ sono state escluse dall'allineamento (%.1f px di scarto rispetto alle altre)";
+"The pair %@ ↔ %@ was left out of the alignment (%.1f px off the others)" = "La coppia %@ ↔ %@ è stata esclusa dall'allineamento (%.1f px di scarto rispetto alle altre)";
 "The tiles could not be aligned" = "Non è stato possibile allineare i tasselli";
-"The photos show perspective: Document mode would align them to %.1f px instead of %.1f px" = "Le foto mostrano una prospettiva: il modo Documento le allineerebbe a %.1f px invece di %.1f px";
+"The photos show perspective: Document mode would align them to %.1f px instead of %.1f px" = "Tra le foto c'è un cambio di prospettiva: con il modo Documento l'errore di allineamento sarebbe %.1f px invece di %.1f px";
 "The photos do not lie on one plane: try Rotation mode" = "Le foto non stanno su un unico piano: prova il modo Rotazione";
 "Some photos are stretched a lot on the reference plane: Rotation mode may suit them better" = "Alcune foto risultano molto stirate sul piano di riferimento: il modo Rotazione potrebbe andare meglio";
 "The photos do not fit a rotating camera; they were joined as a flat document" = "Le foto non corrispondono a una camera che ruota: sono state unite come un documento piano";
@@ -245,3 +245,10 @@
 "The model archive could not be extracted: %@" = "Non è stato possibile estrarre l'archivio dei modelli: %@";
 "The model archive does not contain a complete model set." = "L'archivio dei modelli non contiene un insieme completo di modelli.";
 "The models could not be installed: %@" = "Non è stato possibile installare i modelli: %@";
+"Panorama buffer is smaller than its size" = "Il buffer del panorama è più piccolo delle sue dimensioni";
+"Cannot describe the panorama as an image" = "Impossibile rappresentare il panorama come immagine";
+"Invalid crop" = "Ritaglio non valido";
+"Cannot convert the panorama" = "Impossibile convertire il panorama";
+"Cannot make the preview" = "Impossibile creare l'anteprima";
+"Cannot read %@" = "Impossibile leggere %@";
+"%@ is empty" = "%@ è vuoto";

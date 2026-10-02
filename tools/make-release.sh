@@ -12,6 +12,11 @@ version="${1:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "
 out="$root/build/release"
 rm -rf "$out"
 mkdir -p "$out"
+# Keep the debug symbols of the stripped binary, outside the uploaded files, to read crash reports.
+dsyms="$root/build/dsym"
+mkdir -p "$dsyms"
+rm -rf "$dsyms/Tessera-$version.dSYM"
+ditto "$(swift build -c release --show-bin-path)/Tessera.dSYM" "$dsyms/Tessera-$version.dSYM"
 
 # Every Mach-O file in the bundle may only link system libraries and must allow macOS 15.
 failed=0
@@ -27,6 +32,11 @@ while IFS= read -r file; do
     failed=1
   fi
 done < <(find "$app" -type f -perm -u+x -exec sh -c 'file -b "$1" | grep -q Mach-O && echo "$1"' _ {} \;)
+if strings -a "$app/Contents/MacOS/Tessera" | grep -qF "$root"; then
+  echo "paths of this checkout are left in the binary:" >&2
+  strings -a "$app/Contents/MacOS/Tessera" | grep -F "$root" | head -5 >&2
+  failed=1
+fi
 [ "$failed" = 0 ] || exit 1
 codesign --verify --deep --strict "$app"
 

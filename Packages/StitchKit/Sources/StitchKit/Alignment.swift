@@ -273,7 +273,7 @@ enum Aligner {
             let pair = problem.pairs[worst]
             let limit = max(3 * median, problem.thresholds[pair.b])
             guard alignment.pairRMS[worst] > limit, problem.isConnected(without: [worst]) else { break }
-            notes.append(String(format: String(localized: "%@ and %@ were left out of the alignment (%.1f px off the others)"),
+            notes.append(String(format: String(localized: "The pair %@ ↔ %@ was left out of the alignment (%.1f px off the others)"),
                                 locale: .current, problem.images[pair.a].name, problem.images[pair.b].name, alignment.pairRMS[worst]))
             problem.pairs.remove(at: worst)
             alignment = try solve(alignment.model, problem, anchor: alignment.anchor, straighten: straighten)

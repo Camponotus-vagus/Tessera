@@ -33,7 +33,7 @@ With four photos or fewer, every pair is matched. Otherwise the affinity of a pa
 ### 3. Matching
 
 - **RootSIFT**: exact nearest neighbours from one Accelerate matrix product per block of rows (the descriptors have unit norm, so distances follow from dot products), Lowe's ratio test at 0.8 and a mutual check.
-- **LightGlue** on Core ML (GPU, fp16 by default). Keypoints are normalised by the long edge of the fixed canvas (1024 px), around the canvas centre. The exported matcher returns, for every keypoint of the first photo, its partner and a confidence that is zero when the pair is not mutual; matches above 0.1 are kept. Consecutive shots are matched while extraction is still running.
+- **LightGlue** on Core ML (GPU, fp16 by default). Keypoints are centred on the fixed canvas and divided by half its long edge (512 px), as LightGlue's `normalize_keypoints` does. The exported matcher returns, for every keypoint of the first photo, its partner and a confidence that is zero when the pair is not mutual; matches above 0.1 are kept. Consecutive shots are matched while extraction is still running.
 
 ### 4. Verification
 

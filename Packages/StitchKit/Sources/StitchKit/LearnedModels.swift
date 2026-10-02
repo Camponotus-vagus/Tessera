@@ -274,7 +274,7 @@ func cacheDirectory(_ name: String) -> URL {
 func packageDigest(_ package: URL) throws -> String {
     let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
     guard let enumerator = FileManager.default.enumerator(at: package, includingPropertiesForKeys: keys) else {
-        throw StitchError.engine("Cannot read \(package.lastPathComponent)")
+        throw StitchError.engine(String(localized: "Cannot read \(package.lastPathComponent)"))
     }
     var lines: [String] = []
     let base = package.path
@@ -284,7 +284,7 @@ func packageDigest(_ package: URL) throws -> String {
         let stamp = values.contentModificationDate?.timeIntervalSince1970 ?? 0
         lines.append("\(file.path.dropFirst(base.count))|\(values.fileSize ?? 0)|\(stamp)")
     }
-    guard !lines.isEmpty else { throw StitchError.engine("\(package.lastPathComponent) is empty") }
+    guard !lines.isEmpty else { throw StitchError.engine(String(localized: "\(package.lastPathComponent) is empty")) }
     let digest = SHA256.hash(data: Data(lines.sorted().joined(separator: "\n").utf8))
     return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
 }

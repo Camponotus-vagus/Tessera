@@ -25,7 +25,10 @@ fi
 
 cmake -S "$src/opencv-$version" -B "$build" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="$prefix" \
+  -DCMAKE_INSTALL_PREFIX=/opencv \
+  -DCMAKE_C_FLAGS="\"-ffile-prefix-map=$src/opencv-$version/=opencv-$version/\"" \
+  -DCMAKE_CXX_FLAGS="\"-ffile-prefix-map=$src/opencv-$version/=opencv-$version/\"" \
+  -DOPENCV_VCSVERSION=$version \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DCMAKE_OSX_DEPLOYMENT_TARGET="$deployment" \
   -DBUILD_SHARED_LIBS=OFF \
@@ -40,7 +43,16 @@ cmake -S "$src/opencv-$version" -B "$build" -G Ninja \
   -DWITH_IMGCODEC_HDR=OFF -DWITH_IMGCODEC_SUNRASTER=OFF -DWITH_IMGCODEC_PXM=OFF -DWITH_IMGCODEC_PFM=OFF \
   -DWITH_GTK=OFF -DWITH_QT=OFF -DWITH_VTK=OFF -DWITH_UNIFONT=OFF -DWITH_LAPACK=ON -DWITH_PTHREADS_PF=ON \
   -DOPENCV_GENERATE_PKGCONFIG=OFF -DINSTALL_CREATE_DISTRIB=ON
+# Configuring writes the build directory and the compiler flags, which contain this checkout's path, into
+# two files compiled into libopencv_core: drop the path so that it does not end up in the app.
+for generated in "$build/opencv_data_config.hpp" "$build/modules/core/version_string.inc"; do
+  sed -i '' "s|$root|.|g" "$generated"
+done
 cmake --build "$build"
 rm -rf "$prefix"
-cmake --install "$build" > /dev/null
+cmake --install "$build" --prefix "$prefix" > /dev/null
+if strings -a "$prefix"/lib/*.a "$prefix"/lib/opencv5/3rdparty/*.a | grep -qF "$root"; then
+  echo "paths of this checkout are left in the OpenCV libraries" >&2
+  exit 1
+fi
 echo "OpenCV $version installed in $prefix"

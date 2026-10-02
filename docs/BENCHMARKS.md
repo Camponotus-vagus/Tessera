@@ -31,7 +31,7 @@ The app's default settings, which `stitchbench` gets with `--source both`: both 
 | Newspaper | similarity, flat | 1794 x 1138 | 0.42 px | 0.9 s | 0.7 s | 1.1 GB |
 | Boat | rotation, cylindrical | 10761 x 2752, cropped to 10726 x 2294 | 6.1 px | 1.1 s | 1.8 s | 3.2 GB |
 
-On the drawer the stitching time splits into 0.02 s of alignment, 0.41 s of seam finding, 1.02 s of warping and exposure and 0.35 s of blending; writing a JPEG takes another 0.26 s. The alignment errors of the drawer and the box come from parallax: the specimens stand on pins above the bottom of the drawer and the photos were taken by hand, so no single plane fits every match. The seams go around the specimens, which hides most of it. The newspaper, a flat page, aligns to under half a pixel.
+These runs had other work going on in the background (load average about 4): idle, the drawer's analysis takes 0.9 s, as in the table above. On the drawer the stitching time splits into 0.02 s of alignment, 0.41 s of seam finding, 1.02 s of warping and exposure and 0.35 s of blending; writing a JPEG takes another 0.26 s. The alignment errors of the drawer and the box come from parallax: the specimens stand on pins above the bottom of the drawer and the photos were taken by hand, so no single plane fits every match. The seams go around the specimens, which hides most of it. The newspaper, a flat page, aligns to under half a pixel.
 
 ## Learned extractor, per photo (1024 x 768)
 
@@ -64,9 +64,9 @@ Inliers on the chosen model for the five consecutive pairs:
 | Pair | RootSIFT | RaCo-ALIKED + LightGlue |
 |---|---|---|
 | 1-2 | 33 | 69 |
-| 2-3 | 71 | 73 |
-| 3-4 | 90 | 104 |
+| 2-3 | 71 | 70 |
+| 3-4 | 90 | 92 |
 | 4-5 | 23 (rejected: inliers on a strip) | 47 |
-| 5-6 | 62 | 165 |
+| 5-6 | 62 | 183 |
 
 Only 20-25% of the tentative matches are inliers even on correct pairs: reflections of the ceiling lights move with the camera and the pinned specimens show parallax, so they do not follow a single plane-to-plane transform.
