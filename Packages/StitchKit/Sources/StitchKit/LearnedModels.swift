@@ -117,9 +117,7 @@ public struct LearnedModelSet: Sendable, Hashable, Codable {
         if let resources = Bundle.main.resourceURL {
             paths.append(resources.appendingPathComponent("Models", isDirectory: true))
         }
-        if let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            paths.append(support.appendingPathComponent("Tessera/Models", isDirectory: true))
-        }
+        paths.append(ModelInstaller.standardDestination)
         var folder = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true).standardized
         while true {
             paths.append(folder.appendingPathComponent("Models", isDirectory: true))

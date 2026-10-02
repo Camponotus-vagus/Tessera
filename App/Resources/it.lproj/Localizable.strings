@@ -73,7 +73,6 @@
 /* Settings */
 "Scene" = "Scena";
 "Mode" = "Modo";
-"Models not found: see the README." = "Modelli non trovati: vedi il README.";
 "Extractor" = "Estrattore";
 "Matcher precision" = "Precisione matcher";
 "fp16 (faster)" = "fp16 (più veloce)";
@@ -100,6 +99,21 @@
 "The camera rotates in place: homography between pairs." = "La fotocamera ruota sul posto: omografia tra le coppie.";
 "Tiles of a plane moved under the lens: translation, similarity or affine." = "Tasselli di un piano spostato sotto l'obiettivo: traslazione, similitudine o affine.";
 "A flat original photographed in pieces from different viewpoints: affine or homography." = "Un originale piano ripreso a pezzi da punti diversi: affine o omografia.";
+
+/* Learned models */
+"RaCo + LightGlue needs its models, downloaded once." = "RaCo + LightGlue ha bisogno dei suoi modelli, da scaricare una volta sola.";
+"Download Models" = "Scarica i modelli";
+"Downloading…" = "Download in corso…";
+"Downloading… %@" = "Download in corso… %@";
+"Downloading… %@ of %@" = "Download in corso… %1$@ di %2$@";
+"Checking the download…" = "Verifica del download…";
+"Installing…" = "Installazione…";
+"Cancel" = "Annulla";
+"Retry" = "Riprova";
+"Show in Finder" = "Mostra nel Finder";
+"Remove Models" = "Rimuovi i modelli";
+"Remove the downloaded models?" = "Rimuovere i modelli scaricati?";
+"RaCo + LightGlue stays off until you download them again." = "RaCo + LightGlue resta disattivato finché non li scarichi di nuovo.";
 
 /* Modes, models, sources and verdicts */
 "Automatic" = "Automatico";
