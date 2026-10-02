@@ -154,6 +154,13 @@ int32_t sc_match_learned(sc_onnx_model *model, const float *keypoints, const flo
                          int32_t keypoint_count, int32_t descriptor_size, int32_t *partner, float *confidence,
                          char *error, size_t error_length);
 
+// MARK: - Panorama helpers
+
+/// Largest axis-aligned rectangle of non-zero pixels in `mask` (one byte per pixel). Writes x, y,
+/// width, height into `rect` and returns 1, or returns 0 when the mask has no non-zero pixel.
+int32_t sc_largest_rectangle(const uint8_t *mask, int32_t width, int32_t height, int32_t bytes_per_row,
+                             int32_t *rect);
+
 #ifdef __cplusplus
 }
 #endif
