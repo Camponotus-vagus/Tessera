@@ -1,3 +1,4 @@
+import AppKit
 import StitchKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -148,6 +149,17 @@ private struct StatusBar: View {
             }
             .font(.callout)
             .lineLimit(1)
+        } else if let url = session.lastExport {
+            // Short, so that a long file name does not push the toolbar buttons into the overflow menu.
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.circle")
+                Text("Saved")
+                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                    .buttonStyle(.link)
+            }
+            .font(.callout)
+            .lineLimit(1)
+            .help(url.path)
         } else if let problem = session.report?.learnedProblem {
             // The learned matcher could not load for these settings; the reason is in the tooltip.
             HStack(spacing: 10) {

@@ -60,6 +60,20 @@ struct PanoramaWriterTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == ["pano.png"])
     }
 
+    @Test("TIFF uses LZW for 8 bits and Deflate for 16, where LZW grows the file")
+    func tiffCompression() throws {
+        let directory = try Synthetic.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for sixteenBit in [false, true] {
+            let url = directory.appendingPathComponent("pano\(sixteenBit ? 16 : 8).tif")
+            try PanoramaWriter.write(panorama(), to: url, options: PanoramaExportOptions(format: .tiff, sixteenBit: sixteenBit))
+            let (image, properties) = try read(url)
+            let tiff = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+            #expect(image.bitsPerComponent == (sixteenBit ? 16 : 8))
+            #expect(tiff?[kCGImagePropertyTIFFCompression] as? Int == (sixteenBit ? 8 : 5))
+        }
+    }
+
     @Test("JPEG flattens the transparent border onto white")
     func flattening() throws {
         let directory = try Synthetic.temporaryDirectory()

@@ -165,7 +165,8 @@ public enum PanoramaWriter {
         case .jpeg, .heic:
             properties[kCGImageDestinationLossyCompressionQuality] = min(1, max(0, options.quality))
         case .tiff:
-            properties[kCGImagePropertyTIFFDictionary] = [kCGImagePropertyTIFFCompression: 5]  // LZW
+            // LZW for 8 bits; on 16-bit data ImageIO's LZW grows the file, Deflate does not.
+            properties[kCGImagePropertyTIFFDictionary] = [kCGImagePropertyTIFFCompression: depth == 16 ? 8 : 5]
         case .png:
             break
         }

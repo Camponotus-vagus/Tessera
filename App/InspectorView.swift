@@ -48,7 +48,7 @@ struct InspectorView: View {
                     }
                 }
                 if let panorama = session.panorama {
-                    LabeledContent("Alignment error", value: String(format: "%.1f px", panorama.alignmentError))
+                    LabeledContent("Alignment error", value: String(format: "%.1f px", locale: .current, panorama.alignmentError))
                     LabeledContent("Stitch time", value: Duration.seconds(panorama.timings.total)
                         .formatted(.units(allowed: [.seconds], fractionalPart: .show(length: 1))))
                 }
@@ -123,17 +123,17 @@ struct InspectorView: View {
             Section("Thresholds") {
                 LabeledContent("Ratio test") {
                     Slider(value: $session.configuration.ratio, in: 0.6...0.95, step: 0.05) {
-                        Text(String(format: "%.2f", session.configuration.ratio))
+                        Text(String(format: "%.2f", locale: .current, session.configuration.ratio))
                     }
                 }
                 Stepper(value: $session.configuration.inlierThreshold, in: 1...10, step: 0.5) {
-                    LabeledContent("Tolerance", value: String(format: String(localized: "%.1f px at 1 MP"), session.configuration.inlierThreshold))
+                    LabeledContent("Tolerance", value: String(format: String(localized: "%.1f px at 1 MP"), locale: .current, session.configuration.inlierThreshold))
                 }
                 Stepper(value: $session.configuration.minimumInliers, in: 6...60) {
                     LabeledContent("Minimum inliers", value: "\(session.configuration.minimumInliers)")
                 }
                 Stepper(value: $session.configuration.siftMegapixels, in: 0.5...6, step: 0.5) {
-                    LabeledContent("SIFT resolution", value: String(format: "%.1f MP", session.configuration.siftMegapixels))
+                    LabeledContent("SIFT resolution", value: String(format: "%.1f MP", locale: .current, session.configuration.siftMegapixels))
                 }
             }
 

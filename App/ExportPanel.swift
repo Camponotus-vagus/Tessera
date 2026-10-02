@@ -66,7 +66,10 @@ private struct ExportAccessory: View {
                 }
             }
             .disabled(!choice.options.format.isLossy)
-            Toggle("16 bits per channel", isOn: $choice.options.sixteenBit)
+            Toggle("16 bits per channel", isOn: Binding(
+                get: { choice.options.sixteenBit && choice.options.format.supportsSixteenBit },
+                set: { choice.options.sixteenBit = $0 }
+            ))
                 .disabled(!choice.options.format.supportsSixteenBit)
             Text("\(choice.options.format.label) has no transparency: the empty areas become white.")
                 .font(.caption).foregroundStyle(.secondary)

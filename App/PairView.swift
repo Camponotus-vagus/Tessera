@@ -86,8 +86,8 @@ private struct PairCaption: View {
             Text(evidence.source.label)
             Text("\(evidence.matches.count) matches, \(evidence.inlierCount) inliers")
             if let model = evidence.chosenModel { Text(model.label) }
-            if let fit = evidence.chosenFit { Text(String(format: String(localized: "mean error %.1f px"), fit.rmse)) }
-            Text(String(format: String(localized: "coverage %.0f%%"), evidence.inlierCoverage * 100))
+            if let fit = evidence.chosenFit { Text(String(format: String(localized: "mean error %.1f px"), locale: .current, fit.rmse)) }
+            Text(String(format: String(localized: "coverage %.0f%%"), locale: .current, evidence.inlierCoverage * 100))
             if evidence.log10NFA.isFinite {
                 Text(evidence.log10NFA < 0 ? "NFA 10^\(Int(evidence.log10NFA.rounded()))" : "NFA ≥ 1")
                     .help("Expected number of false alarms: below 1, chance does not explain the pair.")
@@ -281,8 +281,8 @@ private struct MatchDetail: View {
         VStack(alignment: .leading, spacing: 3) {
             Text("Match \(index + 1)").bold()
             Text(isInlier ? "inlier" : "outlier").foregroundStyle(isInlier ? .green : .red)
-            Text(String(format: String(localized: "score %.2f"), match.score))
-            if let error = reprojectionError(match) { Text(String(format: String(localized: "error %.1f px"), error)) }
+            Text(String(format: String(localized: "score %.2f"), locale: .current, match.score))
+            if let error = reprojectionError(match) { Text(String(format: String(localized: "error %.1f px"), locale: .current, error)) }
             Text(String(format: "A (%.0f, %.0f)  B (%.0f, %.0f)", match.a.x, match.a.y, match.b.x, match.b.y))
                 .foregroundStyle(.secondary)
         }

@@ -153,6 +153,7 @@
 "Export Panorama…" = "Esporta panorama…";
 "Export Report…" = "Esporta report…";
 "Exporting…" = "Esportazione…";
+"Saved" = "Salvato";
 "Stitching…" = "Unione in corso…";
 "No two photos were joined: the Graph view shows why." = "Nessuna coppia di foto è stata unita: la vista Grafo mostra perché.";
 "%@ panorama" = "Panorama %@";

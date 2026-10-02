@@ -92,21 +92,27 @@ struct InstalledModelsView: View {
     @State private var confirmingRemoval = false
 
     var body: some View {
-        HStack {
-            Button("Show in Finder") {
-                if let directory = session.configuration.learnedModels?.directory {
-                    NSWorkspace.shared.activateFileViewerSelecting([directory])
-                }
-            }
-            if session.modelsAreRemovable {
-                Button("Remove Models", role: .destructive) { confirmingRemoval = true }
-                    .disabled(session.isRunning)
-            }
+        // Side by side when the labels fit, one above the other otherwise (longer in Italian).
+        ViewThatFits(in: .horizontal) {
+            HStack { buttons }
+            VStack(alignment: .leading) { buttons }
         }
         .confirmationDialog("Remove the downloaded models?", isPresented: $confirmingRemoval) {
             Button("Remove Models", role: .destructive) { session.removeModels() }
         } message: {
             Text("RaCo + LightGlue stays off until you download them again.")
+        }
+    }
+
+    @ViewBuilder private var buttons: some View {
+        Button("Show in Finder") {
+            if let directory = session.configuration.learnedModels?.directory {
+                NSWorkspace.shared.activateFileViewerSelecting([directory])
+            }
+        }
+        if session.modelsAreRemovable {
+            Button("Remove Models", role: .destructive) { confirmingRemoval = true }
+                .disabled(session.isRunning)
         }
     }
 }

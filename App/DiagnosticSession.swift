@@ -149,6 +149,7 @@ final class DiagnosticSession {
         progress = nil
         stitchProgress = nil
         panorama = nil
+        lastExport = nil
         images = []
         excluded = []
         report = nil
@@ -224,6 +225,7 @@ final class DiagnosticSession {
             }
             guard generation == self.generation else { return }
             panorama = result
+            lastExport = nil
             cropsPanorama = result.cropsByDefault
         } catch is CancellationError {
             // Stopped by the user or by a new session.
