@@ -13,13 +13,13 @@ public enum StitchError: Error, LocalizedError, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .cannotOpen(let url): "Cannot open \(url.lastPathComponent)"
-        case .cannotDecode(let url): "Cannot decode \(url.lastPathComponent)"
+        case .cannotOpen(let url): String(localized: "Cannot open \(url.lastPathComponent)")
+        case .cannotDecode(let url): String(localized: "Cannot decode \(url.lastPathComponent)")
         case .engine(let message): message
-        case .modelMissing: "No LightGlue model configured"
-        case .noMatcher: "No matcher selected"
-        case .nothingToStitch: "No two photos were joined"
-        case .photoChanged(let url): "\(url.lastPathComponent) changed since the analysis"
+        case .modelMissing: String(localized: "No LightGlue model configured")
+        case .noMatcher: String(localized: "No matcher selected")
+        case .nothingToStitch: String(localized: "No two photos were joined")
+        case .photoChanged(let url): String(localized: "\(url.lastPathComponent) changed since the analysis")
         }
     }
 

@@ -113,7 +113,7 @@ public struct PanoramaPixels: Sendable {
             : CGBitmapInfo(rawValue: alpha.rawValue)
         guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: target,
                                       bytesPerRow: 0, space: colorSpace, bitmapInfo: outInfo.rawValue)
-        else { throw StitchError.engine("Not enough memory to convert the panorama") }
+        else { throw StitchError.engine(String(localized: "Not enough memory to convert the panorama")) }
         let rect = CGRect(x: 0, y: 0, width: width, height: height)
         if let background {
             context.setFillColor(background)
@@ -132,7 +132,7 @@ public struct PanoramaPixels: Sendable {
         let height = max(1, Int((Double(source.height) * factor).rounded()))
         guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                                       space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { throw StitchError.engine("Not enough memory for the preview") }
+        else { throw StitchError.engine(String(localized: "Not enough memory for the preview")) }
         context.interpolationQuality = .high
         context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
         guard let image = context.makeImage() else { throw StitchError.engine("Cannot make the preview") }
@@ -149,7 +149,7 @@ public enum PanoramaWriter {
         let format = options.format
         let side = max(crop?.width ?? panorama.width, crop?.height ?? panorama.height)
         if format == .jpeg && side > 65535 {
-            throw StitchError.engine("JPEG files can be at most 65535 pixels wide or tall: choose PNG, TIFF or HEIC")
+            throw StitchError.engine(String(localized: "JPEG files can be at most 65535 pixels wide or tall: choose PNG, TIFF or HEIC"))
         }
         let depth = options.sixteenBit && format.supportsSixteenBit && panorama.bitsPerComponent == 16 ? 16 : 8
         let background = format.supportsTransparency ? nil : CGColor(gray: 1, alpha: 1)
@@ -159,7 +159,7 @@ public enum PanoramaWriter {
         let staging = directory.appendingPathComponent(".\(UUID().uuidString)-\(url.lastPathComponent)")
         guard let destination = CGImageDestinationCreateWithURL(staging as CFURL, format.type.identifier as CFString,
                                                                 1, nil)
-        else { throw StitchError.engine("This Mac cannot write \(format.rawValue.uppercased()) files") }
+        else { throw StitchError.engine(String(localized: "This Mac cannot write \(format.rawValue.uppercased()) files")) }
         var properties: [CFString: Any] = [kCGImagePropertyOrientation: 1]
         switch format {
         case .jpeg, .heic:
@@ -173,7 +173,7 @@ public enum PanoramaWriter {
         CGImageDestinationAddImage(destination, image, properties as CFDictionary)
         guard CGImageDestinationFinalize(destination) else {
             try? FileManager.default.removeItem(at: staging)
-            throw StitchError.engine("Could not write \(url.lastPathComponent)")
+            throw StitchError.engine(String(localized: "Could not write \(url.lastPathComponent)"))
         }
         do {
             if FileManager.default.fileExists(atPath: url.path) {

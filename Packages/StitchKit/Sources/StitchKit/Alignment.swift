@@ -273,8 +273,8 @@ enum Aligner {
             let pair = problem.pairs[worst]
             let limit = max(3 * median, problem.thresholds[pair.b])
             guard alignment.pairRMS[worst] > limit, problem.isConnected(without: [worst]) else { break }
-            notes.append(String(format: "%@ and %@ were left out of the alignment (%.1f px off the others)",
-                                problem.images[pair.a].name, problem.images[pair.b].name, alignment.pairRMS[worst]))
+            notes.append(String(format: String(localized: "%@ and %@ were left out of the alignment (%.1f px off the others)"),
+                                locale: .current, problem.images[pair.a].name, problem.images[pair.b].name, alignment.pairRMS[worst]))
             problem.pairs.remove(at: worst)
             alignment = try solve(alignment.model, problem, anchor: alignment.anchor, straighten: straighten)
         }
@@ -292,20 +292,20 @@ enum Aligner {
         switch mode {
         case .plane:
             let fits = [GlobalModel.translation, .similarity, .affine].compactMap { try? solve($0, problem, anchor: centre) }
-            guard let chosen = simplest(fits) else { throw StitchError.engine("The tiles could not be aligned") }
+            guard let chosen = simplest(fits) else { throw StitchError.engine(String(localized: "The tiles could not be aligned")) }
             if let (document, stretch) = try? homographies(problem, anchor: centre), stretch < overstretch,
                document.rms < 0.7 * chosen.rms, chosen.rms - document.rms > 1 {
-                notes.append(String(format: "The photos show perspective: Document mode would align them to %.1f px instead of %.1f px",
-                                    document.rms, chosen.rms))
+                notes.append(String(format: String(localized: "The photos show perspective: Document mode would align them to %.1f px instead of %.1f px"),
+                                    locale: .current, document.rms, chosen.rms))
             }
             return chosen
         case .document:
             let (document, stretch) = try homographies(problem, anchor: centre)
             guard stretch.isFinite else {
-                throw StitchError.engine("The photos do not lie on one plane: try Rotation mode")
+                throw StitchError.engine(String(localized: "The photos do not lie on one plane: try Rotation mode"))
             }
             if stretch > overstretch {
-                notes.append("Some photos are stretched a lot on the reference plane: Rotation mode may suit them better")
+                notes.append(String(localized: "Some photos are stretched a lot on the reference plane: Rotation mode may suit them better"))
             }
             return document
         case .rotation:
@@ -315,7 +315,7 @@ enum Aligner {
                 guard let (document, stretch) = try? homographies(problem, anchor: centre), stretch < overstretch else {
                     throw error
                 }
-                notes.append("The photos do not fit a rotating camera; they were joined as a flat document")
+                notes.append(String(localized: "The photos do not fit a rotating camera; they were joined as a flat document"))
                 return document
             }
         case .auto:
@@ -323,7 +323,7 @@ enum Aligner {
             let document = try? homographies(problem, anchor: centre)
             let rotation = try? solve(.rotation, problem, anchor: centre, straighten: straighten)
             let all = planar.map(\.rms) + [document?.0.rms, rotation?.rms].compactMap { $0 }
-            guard let best = all.min() else { throw StitchError.engine("No global model fits these photos") }
+            guard let best = all.min() else { throw StitchError.engine(String(localized: "No global model fits these photos")) }
             let tolerance = 1.25 * best + 0.5
             let byModel = Dictionary(uniqueKeysWithValues: planar.map { ($0.model, $0) })
             if let t = byModel[.translation], t.rms <= tolerance { return t }
@@ -335,7 +335,7 @@ enum Aligner {
             if let a = byModel[.affine], a.rms <= tolerance { return a }
             if let document, !documentStretched { return document.0 }
             if let rotation { return rotation }
-            throw StitchError.engine("No global model fits these photos")
+            throw StitchError.engine(String(localized: "No global model fits these photos"))
         }
     }
 }

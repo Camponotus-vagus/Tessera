@@ -67,21 +67,21 @@ public enum ModelInstallError: Error, LocalizedError, Sendable, Equatable {
     public var errorDescription: String? {
         switch self {
         case .noManifest:
-            "The list of models to download (models.json) was not found in the app or in a source checkout."
+            String(localized: "The list of models to download (models.json) was not found in the app or in a source checkout.")
         case .network(let reason):
-            "The models could not be downloaded: \(reason)"
+            String(localized: "The models could not be downloaded: \(reason)")
         case .httpStatus(404):
-            "The models could not be downloaded: the server answered 404 (not found). The model release may not be public yet."
+            String(localized: "The models could not be downloaded: the server answered 404 (not found). The model release may not be public yet.")
         case .httpStatus(let status):
-            "The models could not be downloaded: the server answered \(status) (\(HTTPURLResponse.localizedString(forStatusCode: status)))."
+            String(localized: "The models could not be downloaded: the server answered \(status) (\(HTTPURLResponse.localizedString(forStatusCode: status))).")
         case .checksumMismatch:
-            "The downloaded archive does not match its SHA-256 checksum and was discarded. Try again."
+            String(localized: "The downloaded archive does not match its SHA-256 checksum and was discarded. Try again.")
         case .extractionFailed(let reason):
-            "The model archive could not be extracted: \(reason)"
+            String(localized: "The model archive could not be extracted: \(reason)")
         case .incompleteArchive:
-            "The model archive does not contain a complete model set."
+            String(localized: "The model archive does not contain a complete model set.")
         case .fileSystem(let reason):
-            "The models could not be installed: \(reason)"
+            String(localized: "The models could not be installed: \(reason)")
         }
     }
 }

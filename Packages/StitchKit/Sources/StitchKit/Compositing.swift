@@ -143,7 +143,7 @@ final class Compositor: @unchecked Sendable {
         var message = [CChar](repeating: 0, count: 512)
         var result = sc_panorama()
         try check(sc_compositor_finish(pointer, &result, &message, message.count), message)
-        guard let pixels = result.pixels else { throw StitchError.engine("The panorama is empty") }
+        guard let pixels = result.pixels else { throw StitchError.engine(String(localized: "The panorama is empty")) }
         let width = Int(result.width), height = Int(result.height)
         let data = Data(bytesNoCopy: pixels, count: width * height * 8, deallocator: .free)
         let crop = PixelRect(x: Int(result.crop.0), y: Int(result.crop.1), width: Int(result.crop.2),
@@ -201,12 +201,12 @@ struct RotationLayout {
     /// vertical extent allows, spherical otherwise.
     func projection(for requested: Projection) throws -> Projection {
         if yawExtent >= 330 {
-            throw StitchError.engine("Full 360-degree panoramas are not supported yet")
+            throw StitchError.engine(String(localized: "Full 360-degree panoramas are not supported yet"))
         }
         switch requested {
         case .rectilinear:
             guard maxAngle < 80 else {
-                throw StitchError.engine(String(format: "The photos span %.0f degrees: too wide for a rectilinear projection", yawExtent))
+                throw StitchError.engine(String(format: String(localized: "The photos span %.0f degrees: too wide for a rectilinear projection"), locale: .current, yawExtent))
             }
             return .rectilinear
         case .cylindrical, .spherical:
@@ -285,7 +285,7 @@ extension StitchEngine {
         if needed > budget {
             options.scale *= (budget / needed).squareRoot() * 0.98
             compositor = try Compositor(images: composeImages, options: options)
-            notes.append(String(format: "Made at %.0f%% of the requested size to fit in memory", 100 * options.scale / request.size.scale))
+            notes.append(String(format: String(localized: "Made at %.0f%% of the requested size to fit in memory"), locale: .current, 100 * options.scale / request.size.scale))
         }
         timings.alignment = (ContinuousClock.now - start).seconds
 

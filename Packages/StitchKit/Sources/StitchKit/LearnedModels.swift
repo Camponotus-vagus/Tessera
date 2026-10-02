@@ -172,8 +172,8 @@ public struct LearnedModelSet: Sendable, Hashable, Codable {
         if onnx, let units, hasSplitExtractor(precision: configuration.extractorPrecision) { return .split(units) }
         if onnx && hasONNXExtractor { return .onnx }
         throw StitchError.engine(units == nil && !onnx
-            ? "The RaCo-ALIKED extractor on the CPU needs ONNX Runtime, which this build does not include"
-            : "No RaCo-ALIKED extractor for this configuration in \(directory.path)")
+            ? String(localized: "The RaCo-ALIKED extractor on the CPU needs ONNX Runtime, which this build does not include")
+            : String(localized: "No RaCo-ALIKED extractor for this configuration in \(directory.path)"))
     }
 
     /// Whether `LearnedSession` runs LightGlue on Core ML (true) or ONNX Runtime (false) for
@@ -186,8 +186,8 @@ public struct LearnedModelSet: Sendable, Hashable, Codable {
         if coreML && hasCoreMLMatcher(precision: configuration.matcherPrecision) { return true }
         guard Self.onnxAvailable && hasONNXMatcher else {
             throw StitchError.engine(!coreML && !Self.onnxAvailable
-                ? "LightGlue on the CPU needs ONNX Runtime, which this build does not include"
-                : "No LightGlue matcher for this configuration in \(directory.path)")
+                ? String(localized: "LightGlue on the CPU needs ONNX Runtime, which this build does not include")
+                : String(localized: "No LightGlue matcher for this configuration in \(directory.path)"))
         }
         return false
     }
