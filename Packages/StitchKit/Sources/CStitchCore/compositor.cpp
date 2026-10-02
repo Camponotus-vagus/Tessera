@@ -102,11 +102,12 @@ cv::Size scaled(const cv::Size &size, double scale) {
     return cv::Size(std::max(1, int(std::lround(size.width * scale))), std::max(1, int(std::lround(size.height * scale))));
 }
 
-// Bounding box of a photo of `size` mapped by a planar map; throws when a corner falls behind the plane.
+// Pixels covered by a photo of `size` mapped by a planar map (the bounding box of its corner pixel centres);
+// throws when a corner falls behind the plane.
 cv::Rect planar_roi(const cv::Matx33d &M, const cv::Size &size) {
     double minx = INFINITY, miny = INFINITY, maxx = -INFINITY, maxy = -INFINITY;
-    const cv::Point2d corners[4] = {{-0.5, -0.5}, {size.width - 0.5, -0.5}, {size.width - 0.5, size.height - 0.5},
-                                    {-0.5, size.height - 0.5}};
+    const cv::Point2d corners[4] = {{0, 0}, {size.width - 1.0, 0}, {size.width - 1.0, size.height - 1.0},
+                                    {0, size.height - 1.0}};
     for (const cv::Point2d &p : corners) {
         const cv::Vec3d q = M * cv::Vec3d(p.x, p.y, 1);
         if (!(q[2] > 1e-9)) throw std::runtime_error("a photo maps behind the projection plane");
@@ -115,8 +116,9 @@ cv::Rect planar_roi(const cv::Matx33d &M, const cv::Size &size) {
         miny = std::min(miny, q[1] / q[2]);
         maxy = std::max(maxy, q[1] / q[2]);
     }
-    const cv::Point tl(int(std::floor(minx)), int(std::floor(miny)));
-    const cv::Point br(int(std::ceil(maxx)), int(std::ceil(maxy)));
+    // A small tolerance keeps exact integer positions from picking up a neighbouring pixel.
+    const cv::Point tl(int(std::floor(minx + 1e-6)), int(std::floor(miny + 1e-6)));
+    const cv::Point br(int(std::ceil(maxx - 1e-6)) + 1, int(std::ceil(maxy - 1e-6)) + 1);
     return cv::Rect(tl, br);
 }
 
@@ -139,13 +141,11 @@ cv::Point warp(const sc_compositor &c, int i, double scale, const cv::Mat &sourc
     return roi.tl();
 }
 
-// The valid area of photo i, warped: nearest-neighbour warp of a full mask, eroded by one pixel so that
-// interpolation fringes at the border never count as image.
+// The valid area of photo i, warped: nearest-neighbour warp of a full mask. The colour is warped with
+// reflected borders, so border pixels need no erosion.
 cv::Point warp_mask(const sc_compositor &c, int i, double scale, const cv::Size &size, cv::Mat &mask) {
     const cv::Mat ones(size, CV_8U, cv::Scalar(255));
-    const cv::Point tl = warp(c, i, scale, ones, cv::INTER_NEAREST, cv::BORDER_CONSTANT, mask);
-    cv::erode(mask, mask, cv::Mat());
-    return tl;
+    return warp(c, i, scale, ones, cv::INTER_NEAREST, cv::BORDER_CONSTANT, mask);
 }
 
 // Applies an EXIF orientation (1-8) to a photo stored as encoded, giving what a viewer shows.
