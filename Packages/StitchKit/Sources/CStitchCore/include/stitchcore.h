@@ -130,6 +130,14 @@ int32_t sc_extract_sparse(sc_onnx_model *model, const float *logits, const float
 int32_t sc_select_keypoints(sc_onnx_model *model, const float *logits, const float *ranker, int32_t width,
                             int32_t height, sc_extraction *result, char *error, size_t error_length);
 
+// MARK: - RaCo keypoint selection (C++)
+
+/// The same selection as sc_select_keypoints without ONNX Runtime: `logits` and `ranker` [H, W]
+/// -> `keypoints` x 2 floats in `out`, canvas pixels. Needs 256 <= keypoints <= W * H - 256.
+/// Ties and non-finite values are resolved deterministically (see select.cpp).
+int32_t sc_select_keypoints_native(const float *logits, const float *ranker, int32_t width, int32_t height,
+                                   int32_t keypoints, float *out, char *error, size_t error_length);
+
 // MARK: - ALIKED descriptor head (C++, Accelerate)
 
 typedef struct sc_descriptor_head sc_descriptor_head;
