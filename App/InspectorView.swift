@@ -31,17 +31,41 @@ struct InspectorView: View {
                 } else {
                     ModelDownloadView()
                 }
-                Picker("Extractor", selection: $session.configuration.extractorBackend) {
-                    ForEach(LearnedBackend.allCases, id: \.self) { Text($0.label).tag($0) }
+                // Only the choices that the installed set and this build can run, and a picker only when
+                // there is something to choose.
+                if let models = session.configuration.learnedModels {
+                    let configuration = session.configuration
+                    let extractors = runnable(models.extractorBackends(for: configuration),
+                                              current: configuration.extractorBackend, among: LearnedBackend.allCases)
+                    if extractors.count > 1 {
+                        Picker("Extractor", selection: $session.configuration.extractorBackend) {
+                            ForEach(extractors, id: \.self) { Text($0.label).tag($0) }
+                        }
+                    }
+                    let matchers = runnable(models.matcherBackends(for: configuration),
+                                            current: configuration.matcherBackend, among: LearnedBackend.allCases)
+                    if matchers.count > 1 {
+                        Picker("Matcher", selection: $session.configuration.matcherBackend) {
+                            ForEach(matchers, id: \.self) { Text($0.label).tag($0) }
+                        }
+                    }
+                    let precisions = runnable(models.matcherPrecisions(for: configuration),
+                                              current: configuration.matcherPrecision, among: ["fp16", "fp32"])
+                    if precisions.count > 1 {
+                        Picker("Matcher precision", selection: $session.configuration.matcherPrecision) {
+                            ForEach(precisions, id: \.self) { precision in
+                                if precision == "fp16" {
+                                    Text("fp16 (faster)").tag(precision)
+                                } else {
+                                    Text("fp32 (same as ONNX)").tag(precision)
+                                }
+                            }
+                        }
+                    }
+                    if LearnedModelSet.onnxAvailable {
+                        Toggle("Less memory for ONNX Runtime", isOn: $session.configuration.lightGlueLowMemory)
+                    }
                 }
-                Picker("Matcher", selection: $session.configuration.matcherBackend) {
-                    ForEach(LearnedBackend.allCases, id: \.self) { Text($0.label).tag($0) }
-                }
-                Picker("Matcher precision", selection: $session.configuration.matcherPrecision) {
-                    Text("fp16 (faster)").tag("fp16")
-                    Text("fp32 (same as ONNX)").tag("fp32")
-                }
-                Toggle("Less memory for ONNX Runtime", isOn: $session.configuration.lightGlueLowMemory)
             }
 
             Section("Pairs") {
@@ -91,6 +115,12 @@ struct InspectorView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// The supported options in their usual order, plus the current one even when it is not supported,
+    /// so that the picker still shows the selection.
+    private func runnable<T: Equatable>(_ supported: [T], current: T, among all: [T]) -> [T] {
+        all.filter { supported.contains($0) || $0 == current }
     }
 
     private var modeHelp: String {

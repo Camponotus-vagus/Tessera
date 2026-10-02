@@ -302,6 +302,8 @@ public struct MatchReport: Sendable, Codable {
     public var candidates: [CandidatePair]?
     /// Which learned extractor and matcher actually ran, when the learned matcher was used.
     public var learnedPipeline: String?
+    /// Why the learned matcher did not run although it was asked for, RootSIFT running alone.
+    public var learnedProblem: String?
 
     public func evidence(_ a: Int, _ b: Int, source: FeatureSource) -> PairEvidence? {
         pairs.first { $0.source == source && (($0.a == a && $0.b == b) || ($0.a == b && $0.b == a)) }

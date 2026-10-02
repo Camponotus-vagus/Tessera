@@ -132,6 +132,15 @@ private struct StatusBar: View {
             }
             .font(.callout)
             .lineLimit(1)
+        } else if let problem = session.report?.learnedProblem {
+            // The learned matcher could not load for these settings; the reason is in the tooltip.
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle")
+                Text("RootSIFT only: RaCo + LightGlue did not run")
+            }
+            .font(.callout)
+            .lineLimit(1)
+            .help(problem)
         }
     }
 

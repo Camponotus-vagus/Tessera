@@ -133,8 +133,11 @@ int32_t sc_select_keypoints(sc_onnx_model *model, const float *logits, const flo
 // MARK: - RaCo keypoint selection (C++)
 
 /// The same selection as sc_select_keypoints without ONNX Runtime: `logits` and `ranker` [H, W]
-/// -> `keypoints` x 2 floats in `out`, canvas pixels. Needs 256 <= keypoints <= W * H - 256.
-/// Ties and non-finite values are resolved deterministically (see select.cpp).
+/// -> `keypoints` x 2 floats in `out`, canvas pixels. It reproduces RaCo only for
+/// 1024 <= keypoints <= 2560, where RaCo re-ranks the boundary window; other counts from 256 to
+/// W * H - 256 run the same steps (the tests use them on small maps), but RaCo selects differently there.
+/// Same keypoints in the same order as the ONNX model except among exactly equal logits; ties and
+/// non-finite values are resolved deterministically (see select.cpp).
 int32_t sc_select_keypoints_native(const float *logits, const float *ranker, int32_t width, int32_t height,
                                    int32_t keypoints, float *out, char *error, size_t error_length);
 

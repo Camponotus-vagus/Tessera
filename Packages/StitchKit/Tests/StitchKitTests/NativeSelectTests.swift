@@ -1,3 +1,4 @@
+import CoreGraphics
 import CoreML
 import CStitchCore
 import Foundation
@@ -101,10 +102,16 @@ struct NativeSelectTests {
     /// Pairs every keypoint of `a` with an unused keypoint of `b` within `tolerance` pixels per axis:
     /// the number left without a partner and the largest difference among the pairs.
     static func multisetDifference(_ a: [Float], _ b: [Float], tolerance: Float) -> (unmatched: Int, delta: Float) {
+        let (partners, delta) = multisetPairing(a, b, tolerance: tolerance)
+        return (partners.filter { $0 == nil }.count + max(0, b.count / 2 - a.count / 2), delta)
+    }
+
+    /// The pairing of `multisetDifference`: for each keypoint of `a`, the index of its partner in `b`.
+    static func multisetPairing(_ a: [Float], _ b: [Float], tolerance: Float) -> (partners: [Int?], delta: Float) {
         let countB = b.count / 2
         let byX = (0..<countB).sorted { b[2 * $0] < b[2 * $1] }
         var used = [Bool](repeating: false, count: countB)
-        var unmatched = 0
+        var partners: [Int?] = []
         var delta: Float = 0
         for i in 0..<(a.count / 2) {
             let x = a[2 * i], y = a[2 * i + 1]
@@ -124,11 +131,22 @@ struct NativeSelectTests {
             if let best {
                 used[best.index] = true
                 delta = max(delta, best.distance)
-            } else {
-                unmatched += 1
             }
+            partners.append(best?.index)
         }
-        return (unmatched + max(0, countB - a.count / 2), delta)
+        return (partners, delta)
+    }
+
+    /// Indices of the keypoints inside the photo, not on the padding of the canvas (the rule of the
+    /// engine, which drops the others).
+    static func inside(_ keypoints: [Float], content: PixelSize) -> [Int] {
+        (0..<(keypoints.count / 2)).filter {
+            keypoints[2 * $0] < Float(content.width) && keypoints[2 * $0 + 1] < Float(content.height)
+        }
+    }
+
+    static func gather(_ keypoints: [Float], _ indices: [Int]) -> [Float] {
+        indices.flatMap { [keypoints[2 * $0], keypoints[2 * $0 + 1]] }
     }
 
     /// A ramp, so ranker scores follow the position and never tie.
@@ -288,8 +306,11 @@ struct NativeSelectTests {
 
     // MARK: Real photos against the ONNX select model
 
+    /// A set with the feature levels and the ONNX select model.
     static var models: LearnedModelSet? {
-        guard let models = LearnedModelSet.standard(), models.hasLevelsExtractor else { return nil }
+        guard let models = LearnedModelSet.standard(), models.hasLevelsExtractor(nativeSelection: false) else {
+            return nil
+        }
         return models
     }
 
@@ -314,12 +335,28 @@ struct NativeSelectTests {
         }
     }
 
+    /// A 16:9 band across the middle of a photo, written to `directory`: in the 4:3 canvas a quarter of
+    /// the rows (or columns) are padding.
+    static func letterboxed(_ url: URL, in directory: URL) throws -> URL {
+        let image = try ImageLoader.thumbnail(url: url, longSide: 2048)
+        let band = image.width >= image.height
+            ? CGRect(x: 0, y: (image.height - image.width * 9 / 16) / 2, width: image.width, height: image.width * 9 / 16)
+            : CGRect(x: (image.width - image.height * 9 / 16) / 2, y: 0, width: image.height * 9 / 16, height: image.height)
+        let target = directory.appendingPathComponent("letterboxed-\(url.deletingPathExtension().lastPathComponent).png")
+        try Synthetic.write(try #require(image.cropping(to: band)), to: target)
+        return target
+    }
+
     struct Selected {
         var canvas: PixelSize
         var onnx: [Float]
         var native: [Float]
         var onnxDescriptors: [Float]
         var nativeDescriptors: [Float]
+        /// The ONNX keypoints inside the photo.
+        var onnxInside: Set<Int>
+        /// For each native keypoint inside the photo, its partner among the ONNX keypoints.
+        var nativeToONNX: [Int?]
     }
 
     static func seconds(_ body: () -> Void) -> Double {
@@ -337,11 +374,18 @@ struct NativeSelectTests {
         return keypoints.indices.map { (keypoints[$0] - centre[$0 % 2]) / half }
     }
 
+    /// Inside the photo the selections hold the same keypoints. Exactly equal logits may come in another
+    /// order (so some places hold a permutation of each other's keypoints), and on the padding of a
+    /// letterboxed photo, a plateau, other pixels of the same value may be taken.
     @Test("Same keypoints as the ONNX select model on the Core ML maps of real photos",
           .enabled(if: LearnedModelSet.onnxAvailable && models != nil && !photoSets.isEmpty))
     func matchesONNXOnRealPhotos() async throws {
         let models = try #require(Self.models)
         let k = models.keypoints
+        let directory = try Synthetic.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try #require(Self.photoSets.first?.urls.first)
+        let sets = Self.photoSets + [(name: "letterboxed", urls: [try Self.letterboxed(first, in: directory)])]
         var dense: [PixelSize: CoreMLDense] = [:]
         var onnxSelect: [PixelSize: ONNXModel] = [:]
         for canvas in [LearnedModelSet.landscape, LearnedModelSet.portrait] {
@@ -357,7 +401,7 @@ struct NativeSelectTests {
 
         var lines: [String] = []
         var nativeTimes: [Double] = []
-        for set in Self.photoSets {
+        for set in sets {
             var previous: Selected?
             for url in set.urls {
                 let name = "\(set.name)/\(url.lastPathComponent)"
@@ -411,22 +455,49 @@ struct NativeSelectTests {
                     #expect(status == 0)
                     return descriptors
                 }
-                let selected = Selected(canvas: canvas, onnx: onnx, native: native, onnxDescriptors: try describe(onnx),
-                                        nativeDescriptors: try describe(native))
+                try #require(onnx.count == 2 * k)
 
-                #expect(onnx.count == 2 * k)
-                let (unmatched, setDelta) = Self.multisetDifference(onnx, native, tolerance: 1e-4)
-                let orderDelta = Self.maximumDifference(onnx, native)
-                let moved = (0..<min(onnx.count, native.count) / 2).filter {
+                // The keypoints inside the photo, paired as multisets.
+                let content = working.size
+                let onnxInside = Self.inside(onnx, content: content), nativeInside = Self.inside(native, content: content)
+                let (partners, setDelta) = Self.multisetPairing(Self.gather(onnx, onnxInside), Self.gather(native, nativeInside),
+                                                                tolerance: 1e-4)
+                let unmatched = partners.filter { $0 == nil }.count + max(0, nativeInside.count - onnxInside.count)
+                var nativeToONNX = [Int?](repeating: nil, count: k)
+                for (index, partner) in partners.enumerated() {
+                    if let partner { nativeToONNX[nativeInside[partner]] = onnxInside[index] }
+                }
+                #expect(unmatched == 0, "\(name): \(unmatched) keypoints inside the photo without a partner within 1e-4 px")
+
+                // Places that hold different keypoints: inside the photo they swap keypoints among themselves.
+                let moved = (0..<k).filter {
                     max(abs(onnx[2 * $0] - native[2 * $0]), abs(onnx[2 * $0 + 1] - native[2 * $0 + 1])) > 1e-4
-                }.count
-                let identical = zip(onnx, native).filter { $0.bitPattern == $1.bitPattern }.count
-                let descriptorDelta = Self.maximumDifference(selected.onnxDescriptors, selected.nativeDescriptors)
-                #expect(unmatched == 0, "\(name): \(unmatched) keypoints without a partner within 1e-4 px")
-                #expect(orderDelta <= 1e-4, "\(name): \(moved) keypoints in another place")
+                }
+                let onnxSet = Set(onnxInside), nativeSet = Set(nativeInside)
+                let swapped = Self.multisetDifference(Self.gather(onnx, moved.filter(onnxSet.contains)),
+                                                      Self.gather(native, moved.filter(nativeSet.contains)), tolerance: 1e-4)
+                #expect(swapped.unmatched == 0,
+                        "\(name): \(swapped.unmatched) of \(moved.count) keypoints in other places are not a permutation")
+
+                // Descriptors of paired keypoints.
+                let onnxDescriptors = try describe(onnx), nativeDescriptors = try describe(native)
+                let size = head.dimensions
+                var descriptorDelta: Float = 0
+                for (nativeIndex, onnxIndex) in nativeToONNX.enumerated() {
+                    guard let onnxIndex else { continue }
+                    descriptorDelta = max(descriptorDelta, Self.maximumDifference(
+                        Array(onnxDescriptors[(onnxIndex * size)..<((onnxIndex + 1) * size)]),
+                        Array(nativeDescriptors[(nativeIndex * size)..<((nativeIndex + 1) * size)])))
+                }
                 #expect(descriptorDelta <= 1e-4, "\(name): descriptors differ by \(descriptorDelta)")
-                var line = "\(name) \(canvas.width)x\(canvas.height): unmatched \(unmatched), set max delta \(setDelta) px, " +
-                    "same order (\(moved) moved), order max delta \(orderDelta) px, bit-identical coordinates " +
+                let selected = Selected(canvas: canvas, onnx: onnx, native: native, onnxDescriptors: onnxDescriptors,
+                                        nativeDescriptors: nativeDescriptors, onnxInside: onnxSet,
+                                        nativeToONNX: nativeToONNX)
+
+                let identical = zip(onnx, native).filter { $0.bitPattern == $1.bitPattern }.count
+                var line = "\(name) \(canvas.width)x\(canvas.height), photo \(content.width)x\(content.height): " +
+                    "\(onnxInside.count) ONNX and \(nativeInside.count) native keypoints inside, unmatched \(unmatched), " +
+                    "set max delta \(setDelta) px, \(moved.count) in other places, bit-identical coordinates " +
                     "\(identical)/\(2 * k), descriptor max delta \(descriptorDelta); native median " +
                     "\(Self.milliseconds(times[times.count / 2])) (min \(Self.milliseconds(times[0]))), " +
                     "ONNX \(Self.milliseconds(onnxSeconds))"
@@ -435,16 +506,19 @@ struct NativeSelectTests {
                 if let previous {
                     for (precision, matcher) in matchers {
                         func matches(_ a: [Float], _ descriptorsA: [Float], _ b: [Float], _ descriptorsB: [Float]) throws
-                            -> Set<[Int32]> {
+                            -> [(Int, Int)] {
                             let (partner, confidence) = try matcher.match(
                                 keypoints: Self.normalised(a, canvas: previous.canvas) + Self.normalised(b, canvas: canvas),
                                 descriptors: descriptorsA + descriptorsB, count: k, descriptorSize: head.dimensions)
-                            return Set((0..<k).filter { confidence[$0] > 0.1 && partner[$0] >= 0 }
-                                .map { [Int32($0), partner[$0]] })
+                            return (0..<k).filter { confidence[$0] > 0.1 && partner[$0] >= 0 }.map { ($0, Int(partner[$0])) }
                         }
-                        let viaONNX = try matches(previous.onnx, previous.onnxDescriptors, onnx, selected.onnxDescriptors)
-                        let viaNative = try matches(previous.native, previous.nativeDescriptors, native,
-                                                    selected.nativeDescriptors)
+                        // Matches between keypoints inside the photos, the native ones under the ONNX indices.
+                        let viaONNX = Set(try matches(previous.onnx, previous.onnxDescriptors, onnx, onnxDescriptors)
+                            .filter { previous.onnxInside.contains($0.0) && onnxSet.contains($0.1) }.map { [$0.0, $0.1] })
+                        let viaNative = Set(try matches(previous.native, previous.nativeDescriptors, native, nativeDescriptors)
+                            .compactMap { pair in
+                                previous.nativeToONNX[pair.0].flatMap { a in nativeToONNX[pair.1].map { [a, $0] } }
+                            })
                         let differ = viaONNX.symmetricDifference(viaNative).count
                         line += "; LightGlue \(precision) with the previous photo: \(viaONNX.count) vs " +
                             "\(viaNative.count) matches, \(differ) not in both"

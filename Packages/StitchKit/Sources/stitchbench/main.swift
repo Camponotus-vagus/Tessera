@@ -171,6 +171,7 @@ func run() async throws {
     }
     guard let report else { exit(1) }
     if let pipeline = report.learnedPipeline { print("learned: \(pipeline)") }
+    if let problem = report.learnedProblem { warn("RaCo + LightGlue did not run, RootSIFT only: \(problem)") }
 
     print("\nimages")
     for image in report.images {

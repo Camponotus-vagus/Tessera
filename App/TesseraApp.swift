@@ -14,6 +14,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor private var pending: [URL] = []
 
+    /// Cancels a model download in progress and returns its task, so that quitting can wait for the
+    /// partial files to be removed.
+    @MainActor var cancelModelDownload: (() -> Task<Void, Never>?)?
+
     @MainActor
     func application(_ application: NSApplication, open urls: [URL]) {
         if let openFiles {
@@ -24,6 +28,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    @MainActor
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let download = cancelModelDownload?() else { return .terminateNow }
+        Task { @MainActor in
+            await download.value
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 }
 
 @main
@@ -42,6 +56,7 @@ struct TesseraApp: App {
                         session.add(urls)
                         if analyze { session.analyze() }
                     }
+                    delegate.cancelModelDownload = { session.cancelModelDownload() }
                 }
         }
         .defaultSize(width: 1440, height: 900)

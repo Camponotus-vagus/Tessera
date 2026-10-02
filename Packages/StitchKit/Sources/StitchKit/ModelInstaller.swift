@@ -9,13 +9,16 @@ public struct ModelManifest: Sendable, Hashable, Codable {
     public var archive: String
     public var url: URL
     public var sha256: String
+    /// Size of the archive in bytes, shown before the download starts (absent from older manifests).
+    public var size: Int64?
 
-    public init(version: Int = 2, release: String, archive: String, url: URL, sha256: String) {
+    public init(version: Int = 2, release: String, archive: String, url: URL, sha256: String, size: Int64? = nil) {
         self.version = version
         self.release = release
         self.archive = archive
         self.url = url
         self.sha256 = sha256
+        self.size = size
     }
 
     public static func decode(_ data: Data) throws -> ModelManifest {
@@ -113,6 +116,14 @@ public struct ModelInstaller: Sendable {
     public var manifest: ModelManifest?
     public var destination: URL
     public var keypoints: Int
+    /// Configuration of the URLSession of each download; the tests answer through a URLProtocol.
+    var sessionConfiguration: @Sendable () -> URLSessionConfiguration = { .ephemeral }
+    /// Where `compiledCoreMLModel` keeps the compiled packages.
+    var coreMLCache = cacheDirectory("CoreML")
+
+    /// Hidden work folders that nothing has written to for this long were left by an installer that
+    /// stopped without cleaning up (a crash, a forced quit) and are deleted by the next one.
+    static let abandonedAfter: TimeInterval = 10 * 60
 
     /// `~/Library/Application Support/Tessera/Models`, one of `LearnedModelSet.searchPaths`.
     public static var standardDestination: URL {
@@ -133,6 +144,7 @@ public struct ModelInstaller: Sendable {
         guard let manifest else { throw ModelInstallError.noManifest }
         try Task.checkCancellation()
         let manager = FileManager.default
+        removeAbandonedWork()
         // Everything partial lives in one hidden folder next to the destination: on the same volume, so the
         // new set moves into place with a rename, and removed whatever happens.
         let work = sibling(of: destination)
@@ -141,13 +153,10 @@ public struct ModelInstaller: Sendable {
 
         let archive = work.appendingPathComponent("archive.zip")
         progress(ModelInstallProgress(stage: .downloading, received: 0, expected: nil))
-        try await download(manifest.url, to: archive, progress: progress)
+        let (size, digest) = try await download(manifest.url, to: archive, expected: manifest.size, progress: progress)
 
-        let size = Int64((try? archive.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
         progress(ModelInstallProgress(stage: .verifying, received: size, expected: size))
-        guard try fileSystem({ try Self.sha256(of: archive) }) == manifest.sha256.lowercased() else {
-            throw ModelInstallError.checksumMismatch
-        }
+        guard digest == manifest.sha256.lowercased() else { throw ModelInstallError.checksumMismatch }
         try Task.checkCancellation()
 
         progress(ModelInstallProgress(stage: .extracting, received: size, expected: size))
@@ -163,21 +172,47 @@ public struct ModelInstaller: Sendable {
         return LearnedModelSet(directory: destination, keypoints: keypoints)
     }
 
-    /// Deletes the installed set. The folder is renamed first, so a removal that stops halfway does not leave
-    /// a partial set where the engine looks for models.
+    /// Deletes the installed set and the compiled copies of its Core ML packages. The folder is renamed
+    /// first, so a removal that stops halfway does not leave a partial set where the engine looks for models.
     public func remove() throws {
         let manager = FileManager.default
         guard manager.fileExists(atPath: destination.path) else { return }
+        let packages = ((try? manager.contentsOfDirectory(atPath: destination.path)) ?? [])
+            .filter { $0.hasSuffix(".mlpackage") }.map { String($0.dropLast(".mlpackage".count)) }
         let trash = sibling(of: destination)
         try fileSystem {
             try manager.moveItem(at: destination, to: trash)
             try manager.removeItem(at: trash)
+        }
+        // Cache entries are named after their package, then a digest (see compiledCoreMLModel).
+        for entry in (try? manager.contentsOfDirectory(atPath: coreMLCache.path)) ?? []
+        where entry.hasSuffix(".mlmodelc") && packages.contains(where: { entry.hasPrefix("\($0)-") }) {
+            try? manager.removeItem(at: coreMLCache.appendingPathComponent(entry))
         }
     }
 
     private func sibling(of url: URL) -> URL {
         url.deletingLastPathComponent()
             .appendingPathComponent(".\(url.lastPathComponent)-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    /// Deletes the hidden work folders next to `destination` that nothing has written to for
+    /// `abandonedAfter`. More recent ones may belong to another installer running now.
+    func removeAbandonedWork(now: Date = Date()) {
+        let manager = FileManager.default
+        let prefix = ".\(destination.lastPathComponent)-"
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey]
+        let siblings = (try? manager.contentsOfDirectory(at: destination.deletingLastPathComponent(),
+                                                          includingPropertiesForKeys: Array(keys))) ?? []
+        for folder in siblings where folder.lastPathComponent.hasPrefix(prefix)
+            && UUID(uuidString: String(folder.lastPathComponent.dropFirst(prefix.count))) != nil {
+            // A folder's date changes only when entries come and go; the archive's with every write.
+            let contents = (try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: Array(keys))) ?? []
+            let latest = ([folder] + contents).compactMap { try? $0.resourceValues(forKeys: keys).contentModificationDate }
+                .max()
+            if let latest, now.timeIntervalSince(latest) < Self.abandonedAfter { continue }
+            try? manager.removeItem(at: folder)
+        }
     }
 
     private func fileSystem<T>(_ body: () throws -> T) throws -> T {
@@ -190,15 +225,20 @@ public struct ModelInstaller: Sendable {
         }
     }
 
-    private func download(_ url: URL, to file: URL, progress: @escaping @Sendable (ModelInstallProgress) -> Void)
-        async throws {
-        let delegate = DownloadDelegate(target: file, progress: progress)
-        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+    /// Streams `url` into `file` and returns the number of bytes and their SHA-256. `expected` is the size
+    /// reported as long as the server has not sent one.
+    private func download(_ url: URL, to file: URL, expected: Int64?,
+                          progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
+        -> (size: Int64, sha256: String) {
+        let delegate = DownloadDelegate(target: file, expected: expected, progress: progress)
+        let session = URLSession(configuration: sessionConfiguration(), delegate: delegate, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
-        let task = session.downloadTask(with: url)
-        let status: Int?
+        // A data task, not a download task: the bytes go straight into the work folder, so nothing is left
+        // in the temporary directory when the download stops.
+        let task = session.dataTask(with: url)
+        let result: (size: Int64, sha256: String)
         do {
-            status = try await withTaskCancellationHandler {
+            result = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { delegate.start(task, $0) }
             } onCancel: {
                 task.cancel()
@@ -209,7 +249,7 @@ public struct ModelInstaller: Sendable {
             throw ModelInstallError.network(error.localizedDescription)
         }
         try Task.checkCancellation()
-        if let status, !(200..<300).contains(status) { throw ModelInstallError.httpStatus(status) }
+        return result
     }
 
     private func extract(_ archive: URL, into folder: URL, log: URL) async throws {
@@ -234,7 +274,11 @@ public struct ModelInstaller: Sendable {
         while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
             hasher.update(data: chunk)
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return hex(hasher.finalize())
+    }
+
+    static func hex(_ digest: SHA256.Digest) -> String {
+        digest.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Puts `staging` at `destination`. An existing set is swapped out in one atomic rename where the volume
@@ -283,24 +327,35 @@ private func runTool(_ path: String, _ arguments: [String], errors: URL) async t
     }
 }
 
-/// Receives one download task's events: moves the file to `target`, reports progress and resumes the
-/// continuation with the HTTP status (nil for other schemes) or the error.
-private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+/// Receives one data task's events: checks the HTTP status before any of the body arrives, writes the body
+/// to `target` while hashing it, reports progress, and resumes the continuation with the size and SHA-256
+/// or the error.
+private final class DownloadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    typealias Outcome = (size: Int64, sha256: String)
+
     private let target: URL
+    private let fallbackExpected: Int64?
     private let progress: @Sendable (ModelInstallProgress) -> Void
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<Int?, any Error>?
+    private var continuation: CheckedContinuation<Outcome, any Error>?
     /// Set when the task ends before `start` has stored the continuation (a task cancelled straight away).
-    private var outcome: Result<Int?, any Error>?
-    private var moveError: (any Error)?
+    private var outcome: Result<Outcome, any Error>?
+    // Used only by the delegate methods, which the session calls one at a time on its own queue.
+    private var file: FileHandle?
+    private var hasher = SHA256()
+    private var received: Int64 = 0
+    private var expected: Int64?
     private var reported: Int64 = 0
+    /// Why the delegate stopped the task itself: an error status, or a write that failed.
+    private var failure: ModelInstallError?
 
-    init(target: URL, progress: @escaping @Sendable (ModelInstallProgress) -> Void) {
+    init(target: URL, expected: Int64?, progress: @escaping @Sendable (ModelInstallProgress) -> Void) {
         self.target = target
+        fallbackExpected = expected
         self.progress = progress
     }
 
-    func start(_ task: URLSessionTask, _ continuation: CheckedContinuation<Int?, any Error>) {
+    func start(_ task: URLSessionTask, _ continuation: CheckedContinuation<Outcome, any Error>) {
         lock.lock()
         if let outcome {
             lock.unlock()
@@ -312,38 +367,63 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
         task.resume()
     }
 
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
-                    totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        let expected = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : nil
-        // A report every 256 KB and at the end is plenty for a progress bar.
-        let due = lock.withLock {
-            guard totalBytesWritten - reported >= 256 * 1024 || totalBytesWritten == expected else { return false }
-            reported = totalBytesWritten
-            return true
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
+        // An error page is not downloaded: a 404 fails at once.
+        if let status = (response as? HTTPURLResponse)?.statusCode, !(200..<300).contains(status) {
+            failure = .httpStatus(status)
+            completionHandler(.cancel)
+            return
         }
-        if due { progress(ModelInstallProgress(stage: .downloading, received: totalBytesWritten, expected: expected)) }
+        let manager = FileManager.default
+        try? manager.removeItem(at: target)
+        guard manager.createFile(atPath: target.path, contents: nil),
+              let file = FileHandle(forWritingAtPath: target.path) else {
+            failure = .fileSystem("\(target.path) cannot be created")
+            completionHandler(.cancel)
+            return
+        }
+        self.file = file
+        expected = response.expectedContentLength > 0 ? response.expectedContentLength : fallbackExpected
+        completionHandler(.allow)
     }
 
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        // The temporary file is deleted when this method returns.
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let file, failure == nil else { return }
         do {
-            try? FileManager.default.removeItem(at: target)
-            try FileManager.default.moveItem(at: location, to: target)
+            try file.write(contentsOf: data)
         } catch {
-            lock.withLock { moveError = error }
+            failure = .fileSystem(error.localizedDescription)
+            dataTask.cancel()
+            return
         }
+        hasher.update(data: data)
+        received += Int64(data.count)
+        // A report every 256 KB and at the end is plenty for a progress bar.
+        guard received - reported >= 256 * 1024 || received == expected else { return }
+        reported = received
+        progress(ModelInstallProgress(stage: .downloading, received: received, expected: expected))
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
-        let result: Result<Int?, any Error>
-        if let error {
+        var closeError: (any Error)?
+        do {
+            try file?.close()
+        } catch {
+            closeError = error
+        }
+        file = nil
+        let result: Result<Outcome, any Error>
+        if let failure {
+            result = .failure(failure)
+        } else if let error {
             result = .failure(error)
-        } else if let moveError = lock.withLock({ moveError }) {
-            result = .failure(ModelInstallError.fileSystem(moveError.localizedDescription))
-        } else if let response = task.response {
-            result = .success((response as? HTTPURLResponse)?.statusCode)
-        } else {
+        } else if let closeError {
+            result = .failure(ModelInstallError.fileSystem(closeError.localizedDescription))
+        } else if task.response == nil {
             result = .failure(ModelInstallError.network("no response"))
+        } else {
+            result = .success((received, ModelInstaller.hex(hasher.finalize())))
         }
         lock.lock()
         let continuation = self.continuation

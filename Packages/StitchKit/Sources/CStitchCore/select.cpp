@@ -2,10 +2,15 @@
 // of the levels extractor and ALIKED's descriptor head.
 //
 // It reproduces tools/export/split_extractor.py Sparse.keypoints, which mirrors RankerMode.boundary
-// (what RankerMode.auto picks for 1024 <= K < 2560 when the short side is at least 768):
+// (what RankerMode.auto picks for 1024 <= K <= 2560 on these canvases, whose short side is 768). The
+// output is the ONNX model's: the same keypoints in the same order, except among exactly equal logits,
+// which may come in another order and, where they straddle the end of the pool (a plateau such as the
+// zero padding below a letterboxed photo), be other pixels of the same value. The steps:
 //   1. 3x3 non-maximum suppression on the logits (max_pool2d with -inf padding);
-//   2. the exact top K + 256 local maxima by value. RaCoALIKED trims its pool of min(2K, 3840)
-//      candidates to the end of the re-ranking window, since later ones cannot reach the output;
+//   2. the exact top K + 256 local maxima by value. In boundary mode RaCoALIKED.__init__ (aliked.py at
+//      the pinned LightGlue-ONNX commit) sets RaCo's num_candidates, otherwise min(2K, 3840), to the end
+//      of the re-ranking window, since later candidates cannot reach the output; the export and this
+//      file take the same K + 256;
 //   3. sub-pixel offsets: softmax of the raw 3x3 neighbourhood divided by the temperature (0.5),
 //      neighbours outside the image counting as 0 (RaCo's _gather_subpixel_offsets);
 //   4. the 512 candidates from K - 256 on are sampled on the ranker map (grid_sample, bilinear,

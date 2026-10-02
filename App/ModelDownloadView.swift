@@ -8,11 +8,14 @@ struct ModelDownloadView: View {
     @Environment(DiagnosticSession.self) private var session
     var compact = false
 
+    /// Size of the archive from the manifest, so that it is known before the download starts.
+    private static let size = ModelManifest.standard()?.size
+
     var body: some View {
         switch session.modelDownload {
         case .idle:
             layout(stacked: true) {
-                Text("RaCo + LightGlue needs its models, downloaded once.")
+                Text(introduction)
                     .font(compact ? .callout : .caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } action: {
@@ -60,6 +63,11 @@ struct ModelDownloadView: View {
                 action()
             }
         }
+    }
+
+    private var introduction: String {
+        guard let size = Self.size else { return String(localized: "RaCo + LightGlue needs its models, downloaded once.") }
+        return String(localized: "RaCo + LightGlue needs its models (\(size.formatted(.byteCount(style: .file)))), downloaded once.")
     }
 
     private func status(_ progress: ModelInstallProgress?) -> String {

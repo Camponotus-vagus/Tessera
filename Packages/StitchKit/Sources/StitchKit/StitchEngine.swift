@@ -55,7 +55,7 @@ public actor StitchEngine {
         //    learned extractor runs on the GPU, so the two proceed side by side.
         //    Pairs that are candidates whatever the affinity (consecutive shots, or every pair) are
         //    matched by LightGlue as soon as both photos are extracted, while extraction goes on.
-        let session = configuration.sources.contains(.racoLightGlue) ? try await loadLearned(configuration) : nil
+        let (session, learnedProblem) = try await learnedSession(configuration)
         let early = session == nil ? [] : Self.earlyPairs(readable, configuration)
         let (ready, readyPairs) = AsyncStream<(Extraction, Extraction)>.makeStream()
         defer { readyPairs.finish() }
@@ -136,8 +136,20 @@ public actor StitchEngine {
         return MatchReport(
             createdAt: Date(), configuration: configuration, images: images, features: features,
             pairs: verified, graph: graph, excludedByUser: excluded.sorted(), candidates: candidates,
-            learnedPipeline: session?.pipeline
+            learnedPipeline: session?.pipeline, learnedProblem: learnedProblem
         )
+    }
+
+    /// The learned session when RaCo + LightGlue is among the sources. When it cannot be loaded (no
+    /// models for the chosen backends, a backend this build lacks) and RootSIFT runs too, the analysis goes
+    /// on with RootSIFT alone and the reason is returned instead.
+    private func learnedSession(_ configuration: PipelineConfiguration) async throws -> (LearnedSession?, String?) {
+        guard configuration.sources.contains(.racoLightGlue) else { return (nil, nil) }
+        do {
+            return (try await loadLearned(configuration), nil)
+        } catch where !(error is CancellationError) && configuration.sources.contains(.rootSIFT) {
+            return (nil, error.localizedDescription)
+        }
     }
 
     // MARK: - RootSIFT

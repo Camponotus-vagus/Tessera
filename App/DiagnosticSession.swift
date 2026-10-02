@@ -210,8 +210,11 @@ final class DiagnosticSession {
         modelTask = Task { await installModels() }
     }
 
-    func cancelModelDownload() {
+    /// Cancels a download in progress. The returned task ends once its partial files are gone.
+    @discardableResult
+    func cancelModelDownload() -> Task<Void, Never>? {
         modelTask?.cancel()
+        return modelTask
     }
 
     private func installModels() async {
@@ -234,6 +237,8 @@ final class DiagnosticSession {
     }
 
     func removeModels() {
+        // Not while an analysis uses the models or a download is about to replace them.
+        guard !isRunning, modelTask == nil else { return }
         do {
             try ModelInstaller().remove()
         } catch {
