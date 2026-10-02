@@ -65,7 +65,7 @@ public struct LearnedModelSet: Sendable, Hashable, Codable {
     var hasLevelsExtractor: Bool { hasLevelsExtractor(nativeSelection: true) }
 
     /// Whether this build links ONNX Runtime (the ONNXRuntime package trait).
-    static var onnxAvailable: Bool { sc_onnx_available() != 0 }
+    public static var onnxAvailable: Bool { sc_onnx_available() != 0 }
 
     /// Keypoint selection in C++ needs no select model.
     func hasLevelsExtractor(nativeSelection: Bool) -> Bool {
@@ -135,6 +135,94 @@ public struct LearnedModelSet: Sendable, Hashable, Codable {
     /// The first folder in `searchPaths` with a usable model set.
     public static func standard(keypoints: Int = 2048) -> LearnedModelSet? {
         searchPaths.map { LearnedModelSet(directory: $0, keypoints: keypoints) }.first { $0.isUsable }
+    }
+
+    /// Keypoint counts for which the C++ selection reproduces RaCo: those for which RaCo ranks the
+    /// boundary window on these canvases.
+    static let nativeSelectionKeypoints = 1024...2560
+
+    /// The extractor that `LearnedSession` builds.
+    enum ExtractorPlan: Equatable {
+        /// Feature levels on Core ML, keypoint selection in C++ or with the ONNX select model, C++ head.
+        case levels(MLComputeUnits, nativeSelection: Bool)
+        /// Dense maps on Core ML, sparse half on ONNX Runtime.
+        case split(MLComputeUnits)
+        /// The whole extractor on ONNX Runtime.
+        case onnx
+    }
+
+    /// What `LearnedSession` runs for `configuration` with this set in this build, or why it cannot.
+    func extractorPlan(for configuration: PipelineConfiguration) throws -> ExtractorPlan {
+        guard Self.precisions.contains(configuration.extractorPrecision) else {
+            throw StitchError.engine("Unknown precision \(configuration.extractorPrecision): use fp16 or fp32")
+        }
+        let onnx = Self.onnxAvailable
+        let units = configuration.extractorBackend.computeUnits
+        let nativeSelection = configuration.nativeKeypointSelection ?? true || !onnx
+        if let units, configuration.fastDescriptorHead, hasLevelsExtractor(nativeSelection: nativeSelection) {
+            guard !nativeSelection || Self.nativeSelectionKeypoints.contains(keypoints) else {
+                throw StitchError.engine(
+                    "Keypoint selection in C++ reproduces RaCo only for \(Self.nativeSelectionKeypoints.lowerBound) to " +
+                        "\(Self.nativeSelectionKeypoints.upperBound) keypoints, not \(keypoints)" +
+                        (onnx ? "; select them with the ONNX model instead" : "")
+                )
+            }
+            return .levels(units, nativeSelection: nativeSelection)
+        }
+        if onnx, let units, hasSplitExtractor(precision: configuration.extractorPrecision) { return .split(units) }
+        if onnx && hasONNXExtractor { return .onnx }
+        throw StitchError.engine(units == nil && !onnx
+            ? "The RaCo-ALIKED extractor on the CPU needs ONNX Runtime, which this build does not include"
+            : "No RaCo-ALIKED extractor for this configuration in \(directory.path)")
+    }
+
+    /// Whether `LearnedSession` runs LightGlue on Core ML (true) or ONNX Runtime (false) for
+    /// `configuration`, or why it cannot run it. A missing Core ML package falls back on ONNX Runtime.
+    func matcherOnCoreML(for configuration: PipelineConfiguration) throws -> Bool {
+        guard Self.precisions.contains(configuration.matcherPrecision) else {
+            throw StitchError.engine("Unknown precision \(configuration.matcherPrecision): use fp16 or fp32")
+        }
+        let coreML = configuration.matcherBackend.computeUnits != nil
+        if coreML && hasCoreMLMatcher(precision: configuration.matcherPrecision) { return true }
+        guard Self.onnxAvailable && hasONNXMatcher else {
+            throw StitchError.engine(!coreML && !Self.onnxAvailable
+                ? "LightGlue on the CPU needs ONNX Runtime, which this build does not include"
+                : "No LightGlue matcher for this configuration in \(directory.path)")
+        }
+        return false
+    }
+
+    /// Whether the learned matcher can run `configuration` with this set in this build: an extractor and
+    /// a matcher for its backends, precisions and number of keypoints.
+    public func supports(_ configuration: PipelineConfiguration) -> Bool {
+        (try? extractorPlan(for: configuration)) != nil && (try? matcherOnCoreML(for: configuration)) != nil
+    }
+
+    /// The extractor backends this set and build can run, with the rest of `configuration` unchanged.
+    public func extractorBackends(for configuration: PipelineConfiguration) -> [LearnedBackend] {
+        LearnedBackend.allCases.filter { backend in
+            var candidate = configuration
+            candidate.extractorBackend = backend
+            return (try? extractorPlan(for: candidate)) != nil
+        }
+    }
+
+    /// The matcher backends this set and build can run, with the rest of `configuration` unchanged.
+    public func matcherBackends(for configuration: PipelineConfiguration) -> [LearnedBackend] {
+        LearnedBackend.allCases.filter { backend in
+            var candidate = configuration
+            candidate.matcherBackend = backend
+            return (try? matcherOnCoreML(for: candidate)) != nil
+        }
+    }
+
+    /// The matcher precisions this set and build can run, with the rest of `configuration` unchanged.
+    public func matcherPrecisions(for configuration: PipelineConfiguration) -> [String] {
+        Self.precisions.filter { precision in
+            var candidate = configuration
+            candidate.matcherPrecision = precision
+            return (try? matcherOnCoreML(for: candidate)) != nil
+        }
     }
 }
 
@@ -409,54 +497,46 @@ final class LearnedSession: @unchecked Sendable {
         self.models = models
         key = Self.key(models, configuration)
         let lowMemory = configuration.lightGlueLowMemory
-        for precision in [configuration.extractorPrecision, configuration.matcherPrecision]
-        where !LearnedModelSet.precisions.contains(precision) {
-            throw StitchError.engine("Unknown precision \(precision): use fp16 or fp32")
+        let plan = try models.extractorPlan(for: configuration)
+        let matcherOnCoreML = try models.matcherOnCoreML(for: configuration)
+        if case .levels = plan {
+            head = try DescriptorHead(models.descriptorHead)
+        } else {
+            head = nil
         }
-        let units = configuration.extractorBackend.computeUnits
-        let onnx = LearnedModelSet.onnxAvailable
-        let nativeSelection = configuration.nativeKeypointSelection ?? true || !onnx
-        let useLevels = units != nil && configuration.fastDescriptorHead &&
-            models.hasLevelsExtractor(nativeSelection: nativeSelection)
-        let useSplit = onnx && units != nil && !useLevels
-            && models.hasSplitExtractor(precision: configuration.extractorPrecision)
-        guard useLevels || useSplit || onnx && models.hasONNXExtractor else {
-            throw StitchError.engine("No RaCo-ALIKED extractor for this configuration in \(models.directory.path)")
-        }
-        head = useLevels ? try DescriptorHead(models.descriptorHead) : nil
         for canvas in [LearnedModelSet.landscape, LearnedModelSet.portrait] {
-            if useLevels, let units {
+            switch plan {
+            case .levels(let units, let nativeSelection):
                 extractors[canvas] = Extractor(
                     dense: try await CoreMLDense(package: models.levels(for: canvas), computeUnits: units),
                     select: nativeSelection ? nil
                         : try ONNXModel(models.select(for: canvas), execution: SC_EXECUTION_CPU, lowMemory: lowMemory)
                 )
-            } else if useSplit, let units {
+            case .split(let units):
                 extractors[canvas] = Extractor(
                     dense: try await CoreMLDense(package: models.dense(for: canvas, precision: configuration.extractorPrecision),
                                                  computeUnits: units),
                     sparse: try ONNXModel(models.sparse(for: canvas), execution: SC_EXECUTION_CPU, lowMemory: lowMemory)
                 )
-            } else {
+            case .onnx:
                 extractors[canvas] = Extractor(
                     full: try ONNXModel(models.extractor(for: canvas), execution: SC_EXECUTION_CPU, lowMemory: lowMemory)
                 )
             }
         }
-        let selectName = nativeSelection ? "C++ select" : "select"
-        let extractorName = useLevels ? "levels + \(selectName) + C++ head (Core ML \(configuration.extractorBackend.rawValue))"
-            : useSplit ? "dense \(configuration.extractorPrecision) + sparse (Core ML \(configuration.extractorBackend.rawValue))"
-            : "ONNX Runtime CPU"
-        let package = models.coreMLMatcher(precision: configuration.matcherPrecision)
+        let extractorName = switch plan {
+        case .levels(_, let nativeSelection):
+            "levels + \(nativeSelection ? "C++ select" : "select") + C++ head (Core ML \(configuration.extractorBackend.rawValue))"
+        case .split: "dense \(configuration.extractorPrecision) + sparse (Core ML \(configuration.extractorBackend.rawValue))"
+        case .onnx: "ONNX Runtime CPU"
+        }
         let matcherName: String
-        if let units = configuration.matcherBackend.computeUnits, FileManager.default.fileExists(atPath: package.path) {
-            coreMLMatcher = try await CoreMLMatcher(package: package, computeUnits: units)
+        if matcherOnCoreML, let units = configuration.matcherBackend.computeUnits {
+            coreMLMatcher = try await CoreMLMatcher(package: models.coreMLMatcher(precision: configuration.matcherPrecision),
+                                                    computeUnits: units)
             onnxMatcher = nil
             matcherName = "Core ML \(configuration.matcherPrecision) \(configuration.matcherBackend.rawValue)"
         } else {
-            guard onnx && models.hasONNXMatcher else {
-                throw StitchError.engine("No LightGlue matcher for this configuration in \(models.directory.path)")
-            }
             onnxMatcher = try ONNXModel(models.onnxMatcher, execution: SC_EXECUTION_CPU, lowMemory: lowMemory)
             coreMLMatcher = nil
             matcherName = "ONNX Runtime CPU"

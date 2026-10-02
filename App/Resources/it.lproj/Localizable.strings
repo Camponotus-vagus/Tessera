@@ -29,6 +29,7 @@
 "LightGlue matching" = "Match LightGlue";
 "Geometric verification" = "Verifica geometrica";
 "Pairs between separate groups" = "Coppie tra gruppi separati";
+"RootSIFT only: RaCo + LightGlue did not run" = "Solo RootSIFT: RaCo + LightGlue non è stato eseguito";
 
 /* Sidebar */
 "Photos (%lld)" = "Foto (%lld)";
@@ -102,6 +103,7 @@
 
 /* Learned models */
 "RaCo + LightGlue needs its models, downloaded once." = "RaCo + LightGlue ha bisogno dei suoi modelli, da scaricare una volta sola.";
+"RaCo + LightGlue needs its models (%@), downloaded once." = "RaCo + LightGlue ha bisogno dei suoi modelli (%@), da scaricare una volta sola.";
 "Download Models" = "Scarica i modelli";
 "Downloading…" = "Download in corso…";
 "Downloading… %@" = "Download in corso… %@";

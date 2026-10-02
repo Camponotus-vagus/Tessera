@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Zips the default model set from Models/ for a GitHub release and records its SHA-256
+# Zips the default model set from Models/ for a GitHub release and records its SHA-256 and size
 # in tools/models.json (used by tools/fetch-models.sh and the app bundle script).
 set -euo pipefail
 root="${0:A:h:h}"
@@ -16,12 +16,13 @@ mkdir -p "$root/build"
 rm -f "$archive"
 zip -qry "$archive" "${files[@]}"
 digest=$(shasum -a 256 "$archive" | cut -d' ' -f1)
-/usr/bin/python3 - "$root/tools/models.json" "$version" "$digest" <<'PY'
+size=$(stat -f%z "$archive")
+/usr/bin/python3 - "$root/tools/models.json" "$version" "$digest" "$size" <<'PY'
 import json, sys
-path, version, digest = sys.argv[1:]
+path, version, digest, size = sys.argv[1:]
 json.dump({"version": 2, "release": version, "archive": f"tessera-{version}.zip",
            "url": f"https://github.com/Camponotus-vagus/Tessera/releases/download/{version}/tessera-{version}.zip",
-           "sha256": digest}, open(path, "w"), indent=2)
+           "sha256": digest, "size": int(size)}, open(path, "w"), indent=2)
 PY
 echo "$archive"
-echo "sha256 $digest"
+echo "sha256 $digest, $size bytes"

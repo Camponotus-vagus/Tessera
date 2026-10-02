@@ -4,8 +4,72 @@ import Testing
 
 @testable import StitchKit
 
-/// The installer runs against zips of small fake model files served from file:// URLs, into a temporary
-/// folder that stands in for Application Support.
+/// Answers the installer's requests to hosts ending in `.test`: an archive, an error status, or the start of
+/// a body that never ends.
+final class FakeServer: URLProtocol, @unchecked Sendable {
+    enum Answer {
+        /// The archive in small pieces, with its Content-Length when `announced`.
+        case archive(Data, announced: Bool)
+        /// An error page of 1 MB, enough for several progress reports if it were downloaded.
+        case status(Int)
+        /// `first` bytes of a body of `total` bytes, then nothing until the task is cancelled.
+        case stall(first: Int, total: Int)
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var answers: [String: Answer] = [:]
+
+    /// A URL on a host of its own, so that tests running in parallel do not see each other's answers.
+    static func url(answering answer: Answer) -> URL {
+        let host = "\(UUID().uuidString.lowercased()).test"
+        lock.withLock { answers[host] = answer }
+        return URL(string: "https://\(host)/tessera-models.zip")!
+    }
+
+    /// The installer's configuration with this protocol in front of the built-in ones.
+    static func configuration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FakeServer.self] + (configuration.protocolClasses ?? [])
+        return configuration
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host?.hasSuffix(".test") == true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url, let answer = Self.lock.withLock({ Self.answers[url.host ?? ""] }) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.cannotFindHost))
+            return
+        }
+        switch answer {
+        case .archive(let data, let announced):
+            respond(url, status: 200, length: announced ? data.count : nil)
+            for start in stride(from: 0, to: data.count, by: 512) {
+                client?.urlProtocol(self, didLoad: data.subdata(in: start..<min(data.count, start + 512)))
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        case .status(let status):
+            let page = Data(count: 1 << 20)
+            respond(url, status: status, length: page.count)
+            client?.urlProtocol(self, didLoad: page)
+            client?.urlProtocolDidFinishLoading(self)
+        case .stall(let first, let total):
+            respond(url, status: 200, length: total)
+            client?.urlProtocol(self, didLoad: Data(count: first))
+        }
+    }
+
+    override func stopLoading() {}
+
+    private func respond(_ url: URL, status: Int, length: Int?) {
+        let headers = ["Content-Type": "application/zip"].merging(length.map { ["Content-Length": "\($0)"] } ?? [:]) { $1 }
+        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    }
+}
+
+/// The installer runs against zips of small fake model files served from file:// URLs or by `FakeServer`,
+/// into a temporary folder that stands in for Application Support.
 @Suite("Model installer")
 struct ModelInstallerTests {
     /// The names `LearnedModelSet.isUsable` looks for, as in tools/package-models.sh.
@@ -21,6 +85,8 @@ struct ModelInstallerTests {
         let root: URL
         var support: URL { root.appendingPathComponent("support", isDirectory: true) }
         var destination: URL { support.appendingPathComponent("Models", isDirectory: true) }
+        /// Stands in for the Core ML cache in Caches, which the fake set's package names would otherwise reach.
+        var cache: URL { root.appendingPathComponent("cache", isDirectory: true) }
 
         init() throws {
             root = try Synthetic.temporaryDirectory()
@@ -49,7 +115,10 @@ struct ModelInstallerTests {
         }
 
         func installer(_ manifest: ModelManifest?) -> ModelInstaller {
-            ModelInstaller(manifest: manifest, destination: destination)
+            var installer = ModelInstaller(manifest: manifest, destination: destination)
+            installer.sessionConfiguration = { FakeServer.configuration() }
+            installer.coreMLCache = cache
+            return installer
         }
 
         /// What is left in the folder that holds the installation: nothing partial or hidden.
@@ -81,6 +150,12 @@ struct ModelInstallerTests {
         }
     }
 
+    /// Files that URLSession download tasks leave in the temporary folder when they stop.
+    static func temporaryDownloads() -> Set<String> {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory())) ?? []
+        return Set(names.filter { $0.hasPrefix("CFNetworkDownload_") })
+    }
+
     /// Collects progress reports from any thread.
     final class Recorder: @unchecked Sendable {
         private let lock = NSLock()
@@ -99,6 +174,7 @@ struct ModelInstallerTests {
         #expect(manifest.url.scheme == "https")
         #expect(manifest.url.lastPathComponent == manifest.archive)
         #expect(manifest.sha256.count == 64 && manifest.sha256.allSatisfy(\.isHexDigit))
+        #expect((manifest.size ?? 0) > 0)
 
         let literal = try ModelManifest.decode(Data("""
         {"version": 2, "release": "models-9", "archive": "tessera-models-9.zip",
@@ -106,6 +182,12 @@ struct ModelInstallerTests {
         """.utf8))
         #expect(literal == ModelManifest(release: "models-9", archive: "tessera-models-9.zip",
                                          url: URL(string: "https://example.org/tessera-models-9.zip")!, sha256: "ab"))
+        #expect(literal.size == nil)
+        let sized = try ModelManifest.decode(Data("""
+        {"version": 2, "release": "models-9", "archive": "tessera-models-9.zip",
+         "url": "https://example.org/tessera-models-9.zip", "sha256": "ab", "size": 27793379}
+        """.utf8))
+        #expect(sized.size == 27_793_379)
         #expect(throws: (any Error).self) { try ModelManifest.decode(Data(#"{"version": 2}"#.utf8)) }
     }
 
@@ -131,6 +213,99 @@ struct ModelInstallerTests {
         let received = events.filter { $0.stage == .downloading }.map(\.received)
         #expect(received == received.sorted() && received.allSatisfy { $0 <= size })
         #expect(events.last == ModelInstallProgress(stage: .extracting, received: size, expected: size))
+    }
+
+    @Test("Downloads over HTTPS in pieces, hashing the stream", arguments: [true, false])
+    func servedArchive(announced: Bool) async throws {
+        let sandbox = try Sandbox()
+        defer { sandbox.remove() }
+        let local = try sandbox.archive()
+        let data = try Data(contentsOf: local.url)
+        var manifest = local
+        manifest.url = FakeServer.url(answering: .archive(data, announced: announced))
+        // Without a Content-Length the progress falls back on the size in the manifest.
+        if !announced { manifest.size = Int64(data.count) }
+        let recorder = Recorder()
+        let before = Self.temporaryDownloads()
+
+        try await sandbox.installer(manifest).install { recorder.record($0) }
+
+        #expect(sandbox.marker() == "new")
+        #expect(sandbox.supportContents == ["Models"])
+        let size = Int64(data.count)
+        #expect(recorder.all.contains(ModelInstallProgress(stage: .downloading, received: size, expected: size)))
+        #expect(Self.temporaryDownloads().subtracting(before).isEmpty)
+    }
+
+    @Test("An error status fails before any of the body arrives, with the status in the message",
+          arguments: [404, 500])
+    func errorStatus(_ status: Int) async throws {
+        let sandbox = try Sandbox()
+        defer { sandbox.remove() }
+        let manifest = ModelManifest(release: "test", archive: "tessera-models.zip",
+                                     url: FakeServer.url(answering: .status(status)), sha256: "00")
+        let recorder = Recorder()
+        await #expect(throws: ModelInstallError.httpStatus(status)) {
+            try await sandbox.installer(manifest).install { recorder.record($0) }
+        }
+        #expect(recorder.all == [ModelInstallProgress(stage: .downloading, received: 0, expected: nil)])
+        #expect(sandbox.supportContents.isEmpty)
+        let message = ModelInstallError.httpStatus(status).localizedDescription
+        #expect(message.contains("answered \(status) (\(status == 404 ? "not found" : "internal server error"))"))
+    }
+
+    @Test("Cancelling a slow download halfway leaves no partial file, here or in the temporary folder")
+    func cancelMidTransfer() async throws {
+        let sandbox = try Sandbox()
+        defer { sandbox.remove() }
+        let before = Self.temporaryDownloads()
+        let total = 30_000_000
+        let manifest = ModelManifest(release: "test", archive: "tessera-models.zip",
+                                     url: FakeServer.url(answering: .stall(first: 300_000, total: total)), sha256: "00")
+        let installer = sandbox.installer(manifest)
+        let (reports, report) = AsyncStream.makeStream(of: ModelInstallProgress.self)
+        let task = Task { try await installer.install { report.yield($0) } }
+
+        // Wait for the first bytes, which are already in the work folder when they are reported.
+        for await progress in reports where progress.received > 0 {
+            #expect(progress.expected == Int64(total))
+            break
+        }
+        let work = try #require(sandbox.supportContents.first { $0.hasPrefix(".Models-") })
+        let partial = sandbox.support.appendingPathComponent(work).appendingPathComponent("archive.zip")
+        #expect(try #require(partial.resourceValues(forKeys: [.fileSizeKey]).fileSize) >= 256 * 1024)
+
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(sandbox.supportContents.isEmpty)
+        #expect(Self.temporaryDownloads().subtracting(before).isEmpty)
+    }
+
+    @Test("Work folders left by an installer that stopped are deleted, those in use are kept")
+    func abandonedWork() async throws {
+        let sandbox = try Sandbox()
+        defer { sandbox.remove() }
+        let manager = FileManager.default
+        func folder(_ name: String, folderAge: TimeInterval, archiveAge: TimeInterval) throws {
+            let folder = sandbox.support.appendingPathComponent(name, isDirectory: true)
+            let archive = folder.appendingPathComponent("archive.zip")
+            try manager.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data(count: 1000).write(to: archive)
+            try manager.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -archiveAge)], ofItemAtPath: archive.path)
+            try manager.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -folderAge)], ofItemAtPath: folder.path)
+        }
+        let old = 2 * ModelInstaller.abandonedAfter
+        let stale = ".Models-\(UUID().uuidString)", recent = ".Models-\(UUID().uuidString)"
+        let writing = ".Models-\(UUID().uuidString)", other = ".Models-backup"
+        try folder(stale, folderAge: old, archiveAge: old)
+        try folder(recent, folderAge: ModelInstaller.abandonedAfter / 2, archiveAge: ModelInstaller.abandonedAfter / 2)
+        // Created long ago, but the archive inside is still growing.
+        try folder(writing, folderAge: old, archiveAge: 1)
+        try folder(other, folderAge: old, archiveAge: old)
+
+        try await sandbox.installer(try sandbox.archive()).install()
+
+        #expect(sandbox.supportContents == [other, "Models", recent, writing].sorted())
     }
 
     @Test("A checksum mismatch installs nothing and leaves nothing behind")
@@ -220,15 +395,26 @@ struct ModelInstallerTests {
         #expect(ModelInstallError.httpStatus(404).localizedDescription.contains("404"))
     }
 
-    @Test("Removing deletes the installed set")
+    @Test("Removing deletes the installed set and the compiled copies of its Core ML packages")
     func remove() async throws {
         let sandbox = try Sandbox()
         defer { sandbox.remove() }
         let installer = sandbox.installer(try sandbox.archive())
         try await installer.install()
+        let digest = "0123456789abcdef"
+        let compiled = ["lightglue_raco_aliked_k2048_fp16-\(digest).mlmodelc",
+                        "raco_aliked_levels_768x1024_fp32-\(digest).mlmodelc"]
+        // Another package of the same family, and a file that is not a compiled model.
+        let unrelated = ["lightglue_raco_aliked_k2048_fp32-\(digest).mlmodelc", "raco_aliked_levels_768x1024_fp32-notes.txt"]
+        for name in compiled + unrelated {
+            try FileManager.default.createDirectory(at: sandbox.cache.appendingPathComponent(name),
+                                                    withIntermediateDirectories: true)
+        }
+
         try installer.remove()
         #expect(!installer.isInstalled)
         #expect(sandbox.supportContents.isEmpty)
+        #expect((try FileManager.default.contentsOfDirectory(atPath: sandbox.cache.path)).sorted() == unrelated.sorted())
         try installer.remove()
     }
 }

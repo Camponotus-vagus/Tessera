@@ -3,5 +3,6 @@
   "release": "models-1",
   "archive": "tessera-models-1.zip",
   "url": "https://github.com/Camponotus-vagus/Tessera/releases/download/models-1/tessera-models-1.zip",
-  "sha256": "29bd6a258dd7ca8659db8079bcbf435af6d798fce2bccfad5aa4351805c0b9f2"
+  "sha256": "29bd6a258dd7ca8659db8079bcbf435af6d798fce2bccfad5aa4351805c0b9f2",
+  "size": 27793379
 }

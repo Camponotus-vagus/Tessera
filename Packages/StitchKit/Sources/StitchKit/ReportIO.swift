@@ -18,6 +18,7 @@ extension MatchReport {
             copy.images[index].url = URL(string: name ?? "") ?? URL(string: "image")!
         }
         if let models = copy.configuration.learnedModels {
+            copy.learnedProblem = copy.learnedProblem?.replacingOccurrences(of: models.directory.path, with: "Models")
             copy.configuration.learnedModels = LearnedModelSet(directory: URL(string: "Models")!,
                                                                keypoints: models.keypoints)
         }
