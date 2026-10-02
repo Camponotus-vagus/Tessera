@@ -36,11 +36,12 @@ struct TesseraApp: App {
             ContentView()
                 .environment(session)
                 .task {
-                    // Development shortcut: `open -a Tessera --args --analyze` plus files.
+                    // Development shortcuts: `open -a Tessera <files> --args --analyze` (or --stitch).
                     let analyze = CommandLine.arguments.contains("--analyze")
+                    let stitch = CommandLine.arguments.contains("--stitch")
                     delegate.openFiles = { urls in
                         session.add(urls)
-                        if analyze { session.analyze() }
+                        if stitch { session.stitch() } else if analyze { session.analyze() }
                     }
                 }
         }
@@ -51,18 +52,28 @@ struct TesseraApp: App {
                 Button("New Session") { session.reset() }
                     .keyboardShortcut("n")
             }
+            CommandGroup(replacing: .importExport) {
+                Button("Export Panorama…") { session.exportPanorama() }
+                    .keyboardShortcut("e")
+                    .disabled(session.panorama == nil || session.isExporting)
+            }
             CommandMenu("Analysis") {
                 Button("Analyze") { session.analyze() }
                     .keyboardShortcut("r")
                     .disabled(!session.canAnalyze)
+                Button("Stitch") { session.stitch() }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .disabled(!session.canStitch)
                 Button("Stop") { session.cancel() }
                     .keyboardShortcut(".")
-                    .disabled(!session.isRunning)
+                    .disabled(!session.isBusy)
                 Divider()
                 Button("Graph View") { session.tab = .graph }
                     .keyboardShortcut("1")
                 Button("Pair View") { session.tab = .pair }
                     .keyboardShortcut("2")
+                Button("Panorama View") { session.tab = .panorama }
+                    .keyboardShortcut("3")
             }
         }
     }

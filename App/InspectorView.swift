@@ -14,6 +14,46 @@ struct InspectorView: View {
                 Text(modeHelp).font(.caption).foregroundStyle(.secondary)
             }
 
+            Section("Panorama") {
+                let options = projections
+                Picker("Projection", selection: $session.stitchRequest.projection) {
+                    ForEach(options, id: \.self) { Text($0.label).tag($0) }
+                }
+                .disabled(options.count == 1)
+                Picker("Size", selection: $session.stitchRequest.size) {
+                    Text("Full resolution").tag(OutputSize.full)
+                    Text("Half").tag(OutputSize.fraction(0.5))
+                    Text("Quarter").tag(OutputSize.fraction(0.25))
+                }
+                Picker("Pixels", selection: $session.stitchRequest.blending) {
+                    Text("Blended across seams").tag(Blending.multiBand)
+                    Text("Original values").tag(Blending.none)
+                }
+                Text(session.stitchRequest.blending == .none
+                     ? String(localized: "Each pixel comes from one photo, unchanged unless exposure is compensated: for measurements.")
+                     : String(localized: "Seams run around objects and are blended over a wide band, so they disappear."))
+                    .font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup("Advanced") {
+                    Picker("Seams", selection: $session.stitchRequest.seams) {
+                        Text("Around objects").tag(SeamFinding.graphCut)
+                        Text("Halfway between photos").tag(SeamFinding.voronoi)
+                    }
+                    Picker("Exposure", selection: $session.stitchRequest.exposure) {
+                        Text("One gain per photo and colour").tag(ExposureCompensation.channels)
+                        Text("Gains over the photo (vignetting)").tag(ExposureCompensation.blocks)
+                        Text("Unchanged").tag(ExposureCompensation.none)
+                    }
+                    if session.configuration.mode == .rotation || session.configuration.mode == .auto {
+                        Toggle("Level the horizon", isOn: $session.stitchRequest.straighten)
+                    }
+                }
+                if let panorama = session.panorama {
+                    LabeledContent("Alignment error", value: String(format: "%.1f px", panorama.alignmentError))
+                    LabeledContent("Stitch time", value: Duration.seconds(panorama.timings.total)
+                        .formatted(.units(allowed: [.seconds], fractionalPart: .show(length: 1))))
+                }
+            }
+
             Section("Matcher") {
                 // The last matcher that would run cannot be switched off.
                 Toggle("RootSIFT", isOn: Binding(
@@ -91,6 +131,14 @@ struct InspectorView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// Tiles and documents are always flat; a rotating camera can use any projection.
+    private var projections: [Projection] {
+        switch session.configuration.mode {
+        case .plane, .document: [.automatic]
+        case .rotation, .auto: [.automatic, .rectilinear, .cylindrical, .spherical]
+        }
     }
 
     private var modeHelp: String {

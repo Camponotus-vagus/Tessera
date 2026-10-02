@@ -17,20 +17,25 @@ struct ContentView: View {
             Group {
                 if session.images.isEmpty {
                     EmptyState(importing: $importing)
-                } else if session.report == nil {
+                } else if session.report == nil && session.tab != .panorama {
                     ContentUnavailableView {
-                        Label("Ready to analyse", systemImage: "point.3.connected.trianglepath.dotted")
+                        Label("Ready", systemImage: "point.3.connected.trianglepath.dotted")
                     } description: {
-                        Text("\(session.images.count) photos imported. Press Analyze to find how they connect.")
+                        Text("\(session.images.count) photos imported. Stitch joins them into one image; Analyze only shows how they connect.")
                     } actions: {
-                        Button("Analyze") { session.analyze() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(!session.canAnalyze)
+                        HStack {
+                            Button("Analyze") { session.analyze() }
+                                .disabled(!session.canAnalyze)
+                            Button("Stitch") { session.stitch() }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(!session.canStitch)
+                        }
                     }
                 } else {
                     switch session.tab {
                     case .graph: GraphView()
                     case .pair: PairView()
+                    case .panorama: PanoramaView()
                     }
                 }
             }
@@ -52,22 +57,30 @@ struct ContentView: View {
                 Picker("View", selection: $session.tab) {
                     Text("Graph").tag(DetailTab.graph)
                     Text("Pair").tag(DetailTab.pair)
+                    Text("Panorama").tag(DetailTab.panorama)
                 }
                 .pickerStyle(.segmented)
-                .disabled(session.report == nil)
+                .disabled(session.report == nil && session.panorama == nil && !session.isStitching)
             }
             ToolbarItem(placement: .status) {
                 StatusBar()
             }
             ToolbarItemGroup(placement: .primaryAction) {
-                if session.isRunning {
+                if session.isBusy {
                     Button("Stop", systemImage: "stop.fill") { session.cancel() }
                 } else {
-                    Button("Analyze", systemImage: "play.fill") { session.analyze() }
+                    Button("Analyze", systemImage: "point.3.connected.trianglepath.dotted") { session.analyze() }
                         .disabled(!session.canAnalyze)
+                    Button("Stitch", systemImage: "rectangle.split.3x1") { session.stitch() }
+                        .disabled(!session.canStitch)
                 }
-                Button("Export Report", systemImage: "square.and.arrow.up") { exporting = true }
-                    .disabled(session.report == nil)
+                Menu("Export", systemImage: "square.and.arrow.up") {
+                    Button("Export Panorama…") { session.exportPanorama() }
+                        .disabled(session.panorama == nil || session.isExporting)
+                    Button("Export Report…") { exporting = true }
+                        .disabled(session.report == nil)
+                }
+                .disabled(session.panorama == nil && session.report == nil)
                 Button("Settings", systemImage: "sidebar.trailing") { showInspector.toggle() }
             }
         }
@@ -120,11 +133,14 @@ private struct StatusBar: View {
     @Environment(DiagnosticSession.self) private var session
 
     var body: some View {
-        if session.isRunning || (session.report != nil && !session.reportIsCurrent) {
+        if session.isBusy || session.isExporting || (session.report != nil && !session.reportIsCurrent) {
             HStack(spacing: 10) {
-                if session.isRunning {
+                if session.isBusy {
                     ProgressView().controlSize(.small)
                     Text(progressText)
+                } else if session.isExporting {
+                    ProgressView().controlSize(.small)
+                    Text("Exporting…")
                 } else {
                     Image(systemName: "exclamationmark.triangle")
                     Text("Needs a new analysis")
@@ -136,18 +152,10 @@ private struct StatusBar: View {
     }
 
     private var progressText: String {
-        guard let progress = session.progress else { return String(localized: "Analysing…") }
-        let stage = switch progress.stage {
-        case "sift": String(localized: "RootSIFT keypoints")
-        case "lightglue-extract": String(localized: "RaCo-ALIKED keypoints")
-        case "affinity": String(localized: "Choosing pairs")
-        case "sift-match": String(localized: "RootSIFT matching")
-        case "lightglue-match": String(localized: "LightGlue matching")
-        case "verify": String(localized: "Geometric verification")
-        case "bridge": String(localized: "Pairs between separate groups")
-        default: progress.stage
+        guard let progress = session.stitchProgress ?? session.progress else {
+            return session.isStitching ? String(localized: "Stitching…") : String(localized: "Analysing…")
         }
-        return progress.total > 0 ? "\(stage): \(progress.completed)/\(progress.total)" : stage
+        return progress.label
     }
 }
 

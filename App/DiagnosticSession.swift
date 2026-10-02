@@ -16,6 +16,17 @@ struct PairID: Hashable {
 enum DetailTab: Hashable {
     case graph
     case pair
+    case panorama
+}
+
+/// Why the panorama on screen no longer matches the session.
+enum PanoramaStaleness {
+    /// Photos, exclusions or the scene mode changed: a new analysis is needed.
+    case photos
+    /// The photos were analysed again since.
+    case analysis
+    /// The stitch settings changed.
+    case settings
 }
 
 /// Download of the learned models: nothing going on, in progress (no report yet when nil), or failed.
@@ -39,6 +50,15 @@ final class DiagnosticSession {
     var errorMessage: String?
     private(set) var modelDownload: ModelDownload = .idle
 
+    var stitchRequest = StitchRequest()
+    private(set) var panorama: Panorama?
+    /// Show and export the panorama cropped to its largest rectangle without empty pixels.
+    var cropsPanorama = true
+    private(set) var isStitching = false
+    private(set) var stitchProgress: ProgressEvent?
+    private(set) var isExporting = false
+    private(set) var lastExport: URL?
+
     var tab: DetailTab = .graph
     var selectedImage: Int?
     var selectedPair: PairID?
@@ -50,6 +70,7 @@ final class DiagnosticSession {
     /// Bumped by `reset()`: results of work started before it (analysis, thumbnails) are dropped.
     private var generation = 0
     private var analysis: Task<Void, Never>?
+    private var stitching: Task<Void, Never>?
     private var modelTask: Task<Void, Never>?
 
     init() {
@@ -71,7 +92,27 @@ final class DiagnosticSession {
         configuration.sources.filter { $0 != .racoLightGlue || lightGlueAvailable }
     }
 
-    var canAnalyze: Bool { images.count >= 2 && !isRunning && !activeSources.isEmpty }
+    var isBusy: Bool { isRunning || isStitching }
+
+    var canAnalyze: Bool { images.count >= 2 && !isBusy && !activeSources.isEmpty }
+
+    /// Stitching analyses first when the report is missing, stale, or was made in another scene mode.
+    var canStitch: Bool { images.count - excluded.count >= 2 && !isBusy && !activeSources.isEmpty }
+
+    /// A report that can be stitched as it is.
+    var reportReadyForStitch: Bool { reportIsCurrent && report?.configuration.mode == configuration.mode }
+
+    /// Photos in the report's main group, 0 when it has fewer than two.
+    var stitchableCount: Int {
+        report?.graph.components.first.map { $0.count >= 2 ? $0.count : 0 } ?? 0
+    }
+
+    var panoramaStaleness: PanoramaStaleness? {
+        guard let panorama else { return nil }
+        if !reportReadyForStitch { return .photos }
+        if panorama.reportCreatedAt != report?.createdAt { return .analysis }
+        return panorama.request == stitchRequest ? nil : .settings
+    }
 
     /// The report is stale once photos or exclusions change.
     var reportIsCurrent: Bool {
@@ -101,8 +142,13 @@ final class DiagnosticSession {
         generation += 1
         analysis?.cancel()
         analysis = nil
+        stitching?.cancel()
+        stitching = nil
         isRunning = false
+        isStitching = false
         progress = nil
+        stitchProgress = nil
+        panorama = nil
         images = []
         excluded = []
         report = nil
@@ -138,6 +184,80 @@ final class DiagnosticSession {
 
     func cancel() {
         analysis?.cancel()
+        stitching?.cancel()
+    }
+
+    /// Joins the main group into one image, analysing first when needed. A failed or stopped stitch keeps
+    /// the previous result.
+    func stitch() {
+        guard canStitch else { return }
+        tab = .panorama
+        let generation = generation
+        isStitching = true
+        stitching = Task {
+            defer {
+                if generation == self.generation {
+                    isStitching = false
+                    stitchProgress = nil
+                    stitching = nil
+                }
+            }
+            if !reportReadyForStitch {
+                await run()
+                guard generation == self.generation, reportReadyForStitch, !Task.isCancelled else { return }
+            }
+            await composite(generation)
+        }
+    }
+
+    private func composite(_ generation: Int) async {
+        guard let report else { return }
+        guard stitchableCount >= 2 else {
+            errorMessage = String(localized: "No two photos were joined: the Graph view shows why.")
+            return
+        }
+        do {
+            let result = try await engine.stitch(report, request: stitchRequest) { [weak self] event in
+                Task { @MainActor in
+                    if self?.generation == generation { self?.stitchProgress = event }
+                }
+            }
+            guard generation == self.generation else { return }
+            panorama = result
+            cropsPanorama = result.cropsByDefault
+        } catch is CancellationError {
+            // Stopped by the user or by a new session.
+        } catch {
+            if generation == self.generation { errorMessage = error.localizedDescription }
+        }
+    }
+
+    /// Asks where to save the panorama and writes it there.
+    func exportPanorama() {
+        guard let panorama, !isExporting else { return }
+        Task { await export(panorama) }
+    }
+
+    private func export(_ panorama: Panorama) async {
+        let photos = panorama.imageIDs.compactMap { id in images.first { $0.id == id } }
+        let base = Panorama.suggestedName(first: photos.first?.name ?? "Tessera", last: photos.last?.name ?? "")
+        let crop = cropsPanorama && !panorama.crop.isEmpty ? panorama.crop : nil
+        let size = crop.map { PixelSize(width: $0.width, height: $0.height) } ?? panorama.size
+        guard let (url, options) = await ExportPanel.run(
+            name: String(localized: "\(base) panorama"), directory: photos.first?.url.deletingLastPathComponent(),
+            transparent: crop == nil && !panorama.pixels.opaque, size: size
+        ) else { return }
+        isExporting = true
+        defer { isExporting = false }
+        let pixels = panorama.pixels
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try PanoramaWriter.write(pixels, crop: crop, to: url, options: options)
+            }.value
+            lastExport = url
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func run() async {

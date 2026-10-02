@@ -86,3 +86,49 @@ extension LearnedBackend {
         }
     }
 }
+
+extension Projection {
+    var label: String {
+        switch self {
+        case .automatic: String(localized: "Automatic")
+        case .flat: String(localized: "Flat")
+        case .rectilinear: String(localized: "Rectilinear")
+        case .cylindrical: String(localized: "Cylindrical")
+        case .spherical: String(localized: "Spherical")
+        }
+    }
+}
+
+extension GlobalModel {
+    var label: String {
+        switch self {
+        case .translation: String(localized: "translation")
+        case .similarity: String(localized: "similarity")
+        case .affine: String(localized: "affine")
+        case .homography: String(localized: "homography")
+        case .rotation: String(localized: "rotating camera")
+        }
+    }
+}
+
+extension ProgressEvent {
+    /// What the engine is doing, with the count when it has one.
+    var label: String {
+        let name = switch stage {
+        case "sift": String(localized: "RootSIFT keypoints")
+        case "lightglue-extract": String(localized: "RaCo-ALIKED keypoints")
+        case "affinity": String(localized: "Choosing pairs")
+        case "sift-match": String(localized: "RootSIFT matching")
+        case "lightglue-match": String(localized: "LightGlue matching")
+        case "verify": String(localized: "Geometric verification")
+        case "bridge": String(localized: "Pairs between separate groups")
+        case "align": String(localized: "Aligning the photos")
+        case "seams": String(localized: "Finding seams")
+        case "exposure": String(localized: "Seams and exposure")
+        case "compose": String(localized: "Compositing")
+        case "blend": String(localized: "Blending")
+        default: stage
+        }
+        return total > 0 ? "\(name): \(completed)/\(total)" : name
+    }
+}

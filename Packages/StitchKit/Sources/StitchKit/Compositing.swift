@@ -318,19 +318,21 @@ extension StitchEngine {
         progress: (@Sendable (ProgressEvent) -> Void)?, timings: inout PanoramaTimings
     ) throws -> (PanoramaPixels, PixelRect) {
         var clock = ContinuousClock.now
+        progress?(ProgressEvent(stage: "seams", completed: 0, total: images.count))
         for (index, image) in images.enumerated() {
             try Task.checkCancellation()
-            progress?(ProgressEvent(stage: "seams", completed: index, total: images.count))
             try compositor.addSeamImage(index, ImageLoader.stored(image, target: compositor.seamSize(index), space: space))
+            progress?(ProgressEvent(stage: "seams", completed: index + 1, total: images.count))
         }
         progress?(ProgressEvent(stage: "exposure", completed: 0, total: 0))
         try compositor.prepare()
         timings.seams = (ContinuousClock.now - clock).seconds
         clock = ContinuousClock.now
+        progress?(ProgressEvent(stage: "compose", completed: 0, total: images.count))
         for (index, image) in images.enumerated() {
             try Task.checkCancellation()
-            progress?(ProgressEvent(stage: "compose", completed: index, total: images.count))
             try compositor.addImage(index, ImageLoader.stored(image, target: compositor.imageSize(index), space: space))
+            progress?(ProgressEvent(stage: "compose", completed: index + 1, total: images.count))
         }
         timings.compositing = (ContinuousClock.now - clock).seconds
         clock = ContinuousClock.now

@@ -245,7 +245,7 @@ func run() async throws {
     if let file = options.stitch {
         let start = ContinuousClock.now
         let panorama = try await engine.stitch(report, request: options.request) { event in
-            if event.total > 0 { FileHandle.standardError.write(Data("\r\(event.stage) \(event.completed + 1)/\(event.total)   ".utf8)) }
+            if event.total > 0 { FileHandle.standardError.write(Data("\r\(event.stage) \(event.completed)/\(event.total)   ".utf8)) }
         }
         FileHandle.standardError.write(Data("\r".utf8))
         let crop = (options.crop ?? panorama.cropsByDefault) && !panorama.crop.isEmpty ? panorama.crop : nil
