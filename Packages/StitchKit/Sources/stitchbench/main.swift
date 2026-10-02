@@ -10,6 +10,10 @@ struct Options {
     var models: URL?
     var keypoints = 2048
     var downloadModels = false
+    var align = false
+    var stitch: URL?
+    var request = StitchRequest()
+    var crop: Bool?
     var output: URL?
     var repeats = 1
     var files: [URL] = []
@@ -21,7 +25,9 @@ func usage(_ problem: String? = nil) -> Never {
     usage: stitchbench [--mode auto|rotation|plane|document] [--source sift|lightglue|both]
                        [--models dir] [--keypoints 2048] [--extractor onnx|gpu|ane|all] [--extractor-precision fp32|fp16]
                        [--matcher onnx|gpu|ane|all] [--precision fp16|fp32] [--sift-mp 1.5] [--all-pairs]
-                       [--low-memory] [--onnx-select] [--repeat N] [--out dir] images...
+                       [--low-memory] [--onnx-select] [--align] [--repeat N]
+                       [--stitch file.jpg|png|tif|heic] [--projection automatic|flat|rectilinear|cylindrical|spherical]
+                       [--scale 0.5] [--original-pixels] [--exposure channels|blocks|none] [--crop|--no-crop] [--out dir] images...
            stitchbench --download-models [images...]
     """)
     exit(2)
@@ -83,6 +89,22 @@ func parse() -> Options {
         case "--low-memory": options.configuration.lightGlueLowMemory = true
         case "--onnx-select": options.configuration.nativeKeypointSelection = false
         case "--repeat": options.repeats = number(argument, minimum: 1)
+        case "--align": options.align = true
+        case "--stitch": options.stitch = URL(fileURLWithPath: value(argument))
+        case "--projection":
+            let text = value(argument)
+            guard let projection = Projection(rawValue: text) else { usage("unknown projection \(text)") }
+            options.request.projection = projection
+        case "--scale": options.request.size = .fraction(number(argument, minimum: 0.01))
+        case "--original-pixels":
+            options.request.blending = .none
+            options.request.exposure = .none
+        case "--exposure":
+            let text = value(argument)
+            guard let exposure = ExposureCompensation(rawValue: text) else { usage("unknown exposure \(text)") }
+            options.request.exposure = exposure
+        case "--crop": options.crop = true
+        case "--no-crop": options.crop = false
         case "--out": options.output = URL(fileURLWithPath: value(argument), isDirectory: true)
         case "-h", "--help": usage()
         case let option where option.hasPrefix("--"): usage("unknown option \(option)")
@@ -205,6 +227,45 @@ func run() async throws {
     }
     for node in report.graph.nodes {
         if let exclusion = node.exclusion { print("  image \(node.id) excluded: \(exclusion.rawValue)") }
+    }
+
+    if options.align {
+        let start = ContinuousClock.now
+        let summary = try engine.align(report)
+        let elapsed = ContinuousClock.now - start
+        print("\nalignment: \(summary.model.rawValue), rms \(format(summary.rms))px, anchor \(summary.anchor), " +
+              "\(elapsed.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow)))")
+        if summary.model == .rotation {
+            print("  focal " + summary.focals.map { format($0, 0) }.joined(separator: " "))
+        }
+        for (a, b, rms) in summary.pairs { print("  \(a) - \(b): \(format(rms))px") }
+        for note in summary.notes { print("  note: \(note)") }
+    }
+
+    if let file = options.stitch {
+        let start = ContinuousClock.now
+        let panorama = try await engine.stitch(report, request: options.request) { event in
+            if event.total > 0 { FileHandle.standardError.write(Data("\r\(event.stage) \(event.completed + 1)/\(event.total)   ".utf8)) }
+        }
+        FileHandle.standardError.write(Data("\r".utf8))
+        let crop = (options.crop ?? panorama.cropsByDefault) && !panorama.crop.isEmpty ? panorama.crop : nil
+        let fileFormat = PanoramaFormat.allCases.first { $0.fileExtension == file.pathExtension.lowercased() }
+            ?? (file.pathExtension.lowercased() == "jpeg" ? .jpeg : file.pathExtension.lowercased() == "tiff" ? .tiff : .png)
+        let writeStart = ContinuousClock.now
+        try PanoramaWriter.write(panorama.pixels, crop: crop, to: file,
+                                 options: PanoramaExportOptions(format: fileFormat, sixteenBit: true))
+        let t = panorama.timings
+        let written = (ContinuousClock.now - writeStart).formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow))
+        let size = "\(panorama.size.width)x\(panorama.size.height)"
+        let cropped = crop.map { " cropped to \($0.width)x\($0.height)" } ?? ""
+        print("\npanorama: \(panorama.model.rawValue), \(panorama.projection.rawValue), \(size)\(cropped), " +
+              "alignment \(format(panorama.alignmentError))px")
+        let stages = "align \(format(t.alignment))s, seams \(format(t.seams))s, compose \(format(t.compositing))s, " +
+            "blend \(format(t.blending))s, total \(format(t.total))s"
+        print("  times: \(stages), write \(written), peak RSS \(format(peakResidentMegabytes(), 0)) MB")
+        for note in panorama.notes { print("  note: \(note)") }
+        let total = (ContinuousClock.now - start).formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow))
+        print("  wrote \(file.path) (\(total))")
     }
 
     if let output = options.output {

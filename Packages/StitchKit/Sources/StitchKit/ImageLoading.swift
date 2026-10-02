@@ -8,6 +8,8 @@ public enum StitchError: Error, LocalizedError, Sendable {
     case engine(String)
     case modelMissing
     case noMatcher
+    case nothingToStitch
+    case photoChanged(URL)
 
     public var errorDescription: String? {
         switch self {
@@ -16,6 +18,8 @@ public enum StitchError: Error, LocalizedError, Sendable {
         case .engine(let message): message
         case .modelMissing: "No LightGlue model configured"
         case .noMatcher: "No matcher selected"
+        case .nothingToStitch: "No two photos were joined"
+        case .photoChanged(let url): "\(url.lastPathComponent) changed since the analysis"
         }
     }
 

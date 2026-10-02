@@ -58,13 +58,16 @@ public struct PanoramaPixels: Sendable {
     public var pixels: Data
     /// ICC profile of the colour space the pixels are in.
     public var iccProfile: Data?
+    /// Every pixel is covered: the alpha channel can be dropped.
+    public var opaque: Bool
 
-    public init(width: Int, height: Int, bitsPerComponent: Int, pixels: Data, iccProfile: Data?) {
+    public init(width: Int, height: Int, bitsPerComponent: Int, pixels: Data, iccProfile: Data?, opaque: Bool = false) {
         self.width = width
         self.height = height
         self.bitsPerComponent = bitsPerComponent
         self.pixels = pixels
         self.iccProfile = iccProfile
+        self.opaque = opaque
     }
 
     public var bytesPerRow: Int { width * 4 * bitsPerComponent / 8 }
@@ -74,24 +77,37 @@ public struct PanoramaPixels: Sendable {
         return CGColorSpace(name: CGColorSpace.sRGB)!
     }
 
-    /// The pixels as a CGImage, optionally converted to 8 bits and flattened onto `background`.
-    func cgImage(bitsPerComponent target: Int, flattenOnto background: CGColor? = nil) throws -> CGImage {
+    /// The pixels as a CGImage over the same memory, without alpha when `opaque` (or when `crop`, which must
+    /// hold no transparent pixel, is given).
+    func sourceImage(crop: PixelRect? = nil) throws -> CGImage {
         guard pixels.count >= bytesPerRow * height, width > 0, height > 0 else {
             throw StitchError.engine("Panorama buffer is smaller than its size")
         }
+        let alpha: CGImageAlphaInfo = opaque || crop != nil ? .noneSkipLast : .last
         let info: CGBitmapInfo = bitsPerComponent == 16
-            ? [CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue), .byteOrder16Little]
-            : CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue)
+            ? [CGBitmapInfo(rawValue: alpha.rawValue), .byteOrder16Little]
+            : CGBitmapInfo(rawValue: alpha.rawValue)
         guard let provider = CGDataProvider(data: pixels as CFData),
               let source = CGImage(width: width, height: height, bitsPerComponent: bitsPerComponent,
                                    bitsPerPixel: 4 * bitsPerComponent, bytesPerRow: bytesPerRow, space: colorSpace,
                                    bitmapInfo: info, provider: provider, decode: nil, shouldInterpolate: false,
                                    intent: .defaultIntent)
         else { throw StitchError.engine("Cannot describe the panorama as an image") }
-        guard target != bitsPerComponent || background != nil else { return source }
+        guard let crop else { return source }
+        guard let cropped = source.cropping(to: crop.cgRect) else { throw StitchError.engine("Invalid crop") }
+        return cropped
+    }
+
+    /// The pixels as a CGImage, optionally cropped, converted to 8 bits and flattened onto `background`.
+    func cgImage(bitsPerComponent target: Int, flattenOnto background: CGColor? = nil, crop: PixelRect? = nil) throws
+        -> CGImage {
+        let source = try sourceImage(crop: crop)
+        let opaqueSource = source.alphaInfo == .noneSkipLast
+        guard target != bitsPerComponent || (background != nil && !opaqueSource) else { return source }
+        let width = source.width, height = source.height
 
         // Redraw: CoreGraphics premultiplies while drawing, so 8-bit output from 16-bit input is rounded once.
-        let alpha: CGImageAlphaInfo = background == nil ? .premultipliedLast : .noneSkipLast
+        let alpha: CGImageAlphaInfo = background == nil && !opaqueSource ? .premultipliedLast : .noneSkipLast
         let outInfo: CGBitmapInfo = target == 16
             ? [CGBitmapInfo(rawValue: alpha.rawValue), .byteOrder16Little]
             : CGBitmapInfo(rawValue: alpha.rawValue)
@@ -107,16 +123,37 @@ public struct PanoramaPixels: Sendable {
         guard let image = context.makeImage() else { throw StitchError.engine("Cannot convert the panorama") }
         return image
     }
+
+    /// An 8-bit copy with the long side at most `longSide`, for display.
+    public func preview(longSide: Int = 4096, crop: PixelRect? = nil) throws -> CGImage {
+        let source = try sourceImage(crop: crop)
+        let factor = min(1, Double(longSide) / Double(max(source.width, source.height)))
+        let width = max(1, Int((Double(source.width) * factor).rounded()))
+        let height = max(1, Int((Double(source.height) * factor).rounded()))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { throw StitchError.engine("Not enough memory for the preview") }
+        context.interpolationQuality = .high
+        context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let image = context.makeImage() else { throw StitchError.engine("Cannot make the preview") }
+        return image
+    }
 }
 
 public enum PanoramaWriter {
     /// Writes `panorama` to `url` in the chosen format, replacing an existing file only once the new one is
     /// complete. JPEG and HEIC have no transparency, so an uncropped panorama is flattened onto white.
-    public static func write(_ panorama: PanoramaPixels, to url: URL, options: PanoramaExportOptions) throws {
+    /// `crop` (the panorama's inscribed rectangle) keeps only that area, without alpha.
+    public static func write(_ panorama: PanoramaPixels, crop: PixelRect? = nil, to url: URL,
+                             options: PanoramaExportOptions) throws {
         let format = options.format
+        let side = max(crop?.width ?? panorama.width, crop?.height ?? panorama.height)
+        if format == .jpeg && side > 65535 {
+            throw StitchError.engine("JPEG files can be at most 65535 pixels wide or tall: choose PNG, TIFF or HEIC")
+        }
         let depth = options.sixteenBit && format.supportsSixteenBit && panorama.bitsPerComponent == 16 ? 16 : 8
         let background = format.supportsTransparency ? nil : CGColor(gray: 1, alpha: 1)
-        let image = try panorama.cgImage(bitsPerComponent: depth, flattenOnto: background)
+        let image = try panorama.cgImage(bitsPerComponent: depth, flattenOnto: background, crop: crop)
 
         let directory = url.deletingLastPathComponent()
         let staging = directory.appendingPathComponent(".\(UUID().uuidString)-\(url.lastPathComponent)")

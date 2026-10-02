@@ -269,14 +269,17 @@ int32_t sc_compositor_outline(const sc_compositor *compositor, int32_t index, fl
 /// Sizes the photos must have when added: for the seam copies and for compositing.
 void sc_compositor_seam_size(const sc_compositor *compositor, int32_t index, int32_t *width, int32_t *height);
 void sc_compositor_image_size(const sc_compositor *compositor, int32_t index, int32_t *width, int32_t *height);
-/// Every photo once, oriented RGBA 16-bit at sc_compositor_seam_size. Returns 0, 1 (error) or 2 (cancelled).
-int32_t sc_compositor_add_seam_image(sc_compositor *compositor, int32_t index, const uint16_t *rgba,
-                                     int32_t bytes_per_row, char *error, size_t error_length);
+/// Every photo once, RGBA 16-bit as stored in the file (`width` x `height`) with its EXIF `orientation`
+/// (1-8); once oriented it must have the size of sc_compositor_seam_size. Returns 0, 1 (error) or 2 (cancelled).
+int32_t sc_compositor_add_seam_image(sc_compositor *compositor, int32_t index, const uint16_t *rgba, int32_t width,
+                                     int32_t height, int32_t bytes_per_row, int32_t orientation, char *error,
+                                     size_t error_length);
 /// Exposure gains and seams, after every seam image.
 int32_t sc_compositor_prepare(sc_compositor *compositor, char *error, size_t error_length);
-/// Every photo once, oriented RGBA 16-bit at sc_compositor_image_size, after preparing.
-int32_t sc_compositor_add_image(sc_compositor *compositor, int32_t index, const uint16_t *rgba, int32_t bytes_per_row,
-                                char *error, size_t error_length);
+/// Every photo once after preparing, as for the seam images but at sc_compositor_image_size.
+int32_t sc_compositor_add_image(sc_compositor *compositor, int32_t index, const uint16_t *rgba, int32_t width,
+                                int32_t height, int32_t bytes_per_row, int32_t orientation, char *error,
+                                size_t error_length);
 int32_t sc_compositor_finish(sc_compositor *compositor, sc_panorama *panorama, char *error, size_t error_length);
 void sc_panorama_free(sc_panorama *panorama);
 
@@ -286,6 +289,11 @@ void sc_panorama_free(sc_panorama *panorama);
 /// width, height into `rect` and returns 1, or returns 0 when the mask has no non-zero pixel.
 int32_t sc_largest_rectangle(const uint8_t *mask, int32_t width, int32_t height, int32_t bytes_per_row,
                              int32_t *rect);
+
+/// The panorama crop: the largest rectangle of pixels equal to 255, found on a conservative downscale of
+/// the mask and refined at full resolution.
+int32_t sc_inscribed_rectangle(const uint8_t *mask, int32_t width, int32_t height, int32_t bytes_per_row,
+                               int32_t *rect);
 
 #ifdef __cplusplus
 }

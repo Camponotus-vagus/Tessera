@@ -148,41 +148,67 @@ cv::Point warp_mask(const sc_compositor &c, int i, double scale, const cv::Size 
     return tl;
 }
 
+// Applies an EXIF orientation (1-8) to a photo stored as encoded, giving what a viewer shows.
+cv::Mat oriented(const cv::Mat &stored, int orientation) {
+    cv::Mat result;
+    switch (orientation) {
+        case 2: cv::flip(stored, result, 1); break;
+        case 3: cv::rotate(stored, result, cv::ROTATE_180); break;
+        case 4: cv::flip(stored, result, 0); break;
+        case 5: cv::transpose(stored, result); break;
+        case 6: cv::rotate(stored, result, cv::ROTATE_90_CLOCKWISE); break;
+        case 7: cv::transpose(stored, result); cv::flip(result, result, -1); break;
+        case 8: cv::rotate(stored, result, cv::ROTATE_90_COUNTERCLOCKWISE); break;
+        default: result = stored; break;
+    }
+    return result;
+}
+
+// An RGBA16 buffer as stored, oriented and without alpha; checks it has the expected oriented size.
+cv::Mat rgb_from(const uint16_t *rgba, int width, int height, int bytes_per_row, int orientation, const cv::Size &expected) {
+    if (width < 1 || height < 1 || bytes_per_row < width * 8) throw std::runtime_error("invalid photo buffer");
+    const cv::Mat stored(height, width, CV_16UC4, const_cast<uint16_t *>(rgba), size_t(bytes_per_row));
+    cv::Mat rgb;
+    cv::cvtColor(stored, rgb, cv::COLOR_RGBA2RGB);
+    rgb = oriented(rgb, orientation);
+    if (rgb.size() != expected) throw std::runtime_error("photo size does not match the alignment");
+    return rgb;
+}
+
 void check(const sc_compositor &c) {
     if (c.cancelled.load()) throw std::runtime_error("cancelled");
 }
 
-// Largest rectangle of fully valid pixels, searched on a conservative downscale (a cell counts only when
-// all of its pixels are valid), then trimmed and grown at full resolution.
+// Largest rectangle of fully valid pixels. Exact on masks up to 60 MP; above that it is searched on a
+// conservative downscale (a cell counts only when every pixel around its sample is valid), mapped back
+// inside the valid area and grown at full resolution.
 cv::Rect inscribed_rectangle(const cv::Mat &mask) {
-    const double factor = std::min(1.0, 1024.0 / std::max(mask.cols, mask.rows));
-    cv::Mat valid = mask == 255, small;
-    if (factor < 1) {
-        // Min-pool: a cell is valid only when every pixel in it is.
-        cv::Mat eroded;
-        const int k = int(std::ceil(1 / factor)) + 1;
-        cv::erode(valid, eroded, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k)));
-        cv::resize(eroded, small, cv::Size(), factor, factor, cv::INTER_NEAREST);
-    } else {
-        small = valid;
-    }
+    cv::Mat valid = mask == 255;
     int32_t r[4];
-    if (!stitchcore::largest_rectangle(small.data, small.cols, small.rows, small.step, r)) return cv::Rect();
-    cv::Rect rect(int(std::ceil(r[0] / factor)), int(std::ceil(r[1] / factor)), int(std::floor(r[2] / factor)),
-                  int(std::floor(r[3] / factor)));
-    rect &= cv::Rect(0, 0, mask.cols, mask.rows);
-    auto full_row = [&](int y, int x0, int x1) { return cv::countNonZero(valid(cv::Range(y, y + 1), cv::Range(x0, x1))) == x1 - x0; };
-    auto full_column = [&](int x, int y0, int y1) { return cv::countNonZero(valid(cv::Range(y0, y1), cv::Range(x, x + 1))) == y1 - y0; };
-    // Trim edges that still touch invalid pixels, then grow while the next row or column is full.
-    for (int pass = 0; pass < 2 && !rect.empty(); ++pass) {
-        while (rect.height > 0 && !full_row(rect.y, rect.x, rect.x + rect.width)) { ++rect.y; --rect.height; }
-        while (rect.height > 0 && !full_row(rect.y + rect.height - 1, rect.x, rect.x + rect.width)) --rect.height;
-        while (rect.width > 0 && !full_column(rect.x, rect.y, rect.y + rect.height)) { ++rect.x; --rect.width; }
-        while (rect.width > 0 && !full_column(rect.x + rect.width - 1, rect.y, rect.y + rect.height)) --rect.width;
+    if (valid.total() <= 60'000'000) {
+        if (!stitchcore::largest_rectangle(valid.data, valid.cols, valid.rows, valid.step, r)) return cv::Rect();
+        return cv::Rect(r[0], r[1], r[2], r[3]);
     }
-    if (rect.empty()) return rect;
-    bool grew = true;
-    while (grew) {
+    const double factor = 4096.0 / std::max(mask.cols, mask.rows);
+    const int k = int(std::ceil(1 / factor)) + 1;
+    cv::Mat eroded, small;
+    cv::erode(valid, eroded, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(k, k)));
+    cv::resize(eroded, small, cv::Size(), factor, factor, cv::INTER_NEAREST);
+    if (!stitchcore::largest_rectangle(small.data, small.cols, small.rows, small.step, r)) return cv::Rect();
+    // INTER_NEAREST samples pixel floor(i / factor) for cell i, and every sample of a valid cell has a valid
+    // neighbourhood wider than the spacing between samples: the span between the first and last samples
+    // is valid.
+    auto sample = [&](int cell, int limit) { return std::min(limit - 1, int(std::floor(cell / factor))); };
+    const int x0 = sample(r[0], mask.cols), x1 = sample(r[0] + r[2] - 1, mask.cols);
+    const int y0 = sample(r[1], mask.rows), y1 = sample(r[1] + r[3] - 1, mask.rows);
+    cv::Rect rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+    if (cv::countNonZero(valid(rect)) != int(rect.area())) {
+        if (!stitchcore::largest_rectangle(valid.data, valid.cols, valid.rows, valid.step, r)) return cv::Rect();
+        return cv::Rect(r[0], r[1], r[2], r[3]);
+    }
+    auto full_row = [&](int y, int a, int b) { return cv::countNonZero(valid(cv::Range(y, y + 1), cv::Range(a, b))) == b - a; };
+    auto full_column = [&](int x, int a, int b) { return cv::countNonZero(valid(cv::Range(a, b), cv::Range(x, x + 1))) == b - a; };
+    for (bool grew = true; grew;) {
         grew = false;
         if (rect.y > 0 && full_row(rect.y - 1, rect.x, rect.x + rect.width)) { --rect.y; ++rect.height; grew = true; }
         if (rect.y + rect.height < mask.rows && full_row(rect.y + rect.height, rect.x, rect.x + rect.width)) { ++rect.height; grew = true; }
@@ -215,6 +241,12 @@ cv::Mat gain_map(const sc_compositor &c, int i, const cv::Size &size) {
         default:
             return cv::Mat();
     }
+}
+
+// cv::multiply takes a per-channel constant only as a Scalar.
+cv::Scalar as_scalar(const cv::Mat &single) {
+    const cv::Vec3f g = single.at<cv::Vec3f>(0, 0);
+    return cv::Scalar(g[0], g[1], g[2]);
 }
 
 }  // namespace
@@ -332,7 +364,8 @@ extern "C" void sc_compositor_image_size(const sc_compositor *c, int32_t index, 
 }
 
 extern "C" int32_t sc_compositor_add_seam_image(sc_compositor *c, int32_t index, const uint16_t *rgba,
-                                                int32_t bytes_per_row, char *error, size_t error_length) {
+                                                int32_t width, int32_t height, int32_t bytes_per_row,
+                                                int32_t orientation, char *error, size_t error_length) {
     if (c == nullptr || rgba == nullptr || index < 0 || index >= c->count || c->prepared) {
         write_error(error, error_length, "invalid seam image");
         return 1;
@@ -340,12 +373,9 @@ extern "C" int32_t sc_compositor_add_seam_image(sc_compositor *c, int32_t index,
     try {
         check(*c);
         const cv::Size size = scaled(c->full[index], c->options.seam_scale);
-        if (bytes_per_row < size.width * 8) throw std::runtime_error("seam image rows are too short");
-        const cv::Mat source(size, CV_16UC4, const_cast<uint16_t *>(rgba), size_t(bytes_per_row));
         // Exposure compensation and graph cut expect 0..255 values.
-        cv::Mat rgb16, rgb, warped, mask;
-        cv::cvtColor(source, rgb16, cv::COLOR_RGBA2RGB);
-        rgb16.convertTo(rgb, CV_8U, 1.0 / 257.0);
+        cv::Mat rgb, warped, mask;
+        rgb_from(rgba, width, height, bytes_per_row, orientation, size).convertTo(rgb, CV_8U, 1.0 / 257.0);
         c->seam_corners[index] = warp(*c, index, c->options.seam_scale, rgb, cv::INTER_LINEAR, cv::BORDER_REFLECT, warped);
         warp_mask(*c, index, c->options.seam_scale, size, mask);
         if (mask.size() != warped.size()) throw std::runtime_error("seam mask and image differ in size");
@@ -438,8 +468,9 @@ extern "C" int32_t sc_compositor_prepare(sc_compositor *c, char *error, size_t e
     }
 }
 
-extern "C" int32_t sc_compositor_add_image(sc_compositor *c, int32_t index, const uint16_t *rgba,
-                                           int32_t bytes_per_row, char *error, size_t error_length) {
+extern "C" int32_t sc_compositor_add_image(sc_compositor *c, int32_t index, const uint16_t *rgba, int32_t width,
+                                           int32_t height, int32_t bytes_per_row, int32_t orientation, char *error,
+                                           size_t error_length) {
     if (c == nullptr || rgba == nullptr || index < 0 || index >= c->count || !c->prepared || c->added[index]) {
         write_error(error, error_length, "photos must be added once, after preparing");
         return 1;
@@ -447,10 +478,7 @@ extern "C" int32_t sc_compositor_add_image(sc_compositor *c, int32_t index, cons
     try {
         check(*c);
         const cv::Size size = scaled(c->full[index], c->options.scale);
-        if (bytes_per_row < size.width * 8) throw std::runtime_error("image rows are too short");
-        const cv::Mat source(size, CV_16UC4, const_cast<uint16_t *>(rgba), size_t(bytes_per_row));
-        cv::Mat rgb, warped, mask;
-        cv::cvtColor(source, rgb, cv::COLOR_RGBA2RGB);
+        cv::Mat rgb = rgb_from(rgba, width, height, bytes_per_row, orientation, size), warped, mask;
         const cv::Point tl = warp(*c, index, c->options.scale, rgb, interpolation(*c), cv::BORDER_REFLECT, warped);
         rgb.release();
         warp_mask(*c, index, c->options.scale, size, mask);
@@ -473,7 +501,7 @@ extern "C" int32_t sc_compositor_add_image(sc_compositor *c, int32_t index, cons
             if (!gains.empty()) {
                 cv::Mat f;
                 warped.convertTo(f, CV_32F);
-                if (gains.total() == 1) cv::multiply(f, gains.at<cv::Vec3f>(0, 0), f);
+                if (gains.total() == 1) cv::multiply(f, as_scalar(gains), f);
                 else cv::multiply(f, gains, f);
                 f.convertTo(values, CV_16U);
             }
@@ -488,7 +516,7 @@ extern "C" int32_t sc_compositor_add_image(sc_compositor *c, int32_t index, cons
             } else {
                 cv::Mat f;
                 warped.convertTo(f, CV_32F, c->value_scale);
-                if (gains.total() == 1) cv::multiply(f, gains.at<cv::Vec3f>(0, 0), f);
+                if (gains.total() == 1) cv::multiply(f, as_scalar(gains), f);
                 else cv::multiply(f, gains, f);
                 f.convertTo(feed, CV_16S);
             }
@@ -557,4 +585,20 @@ extern "C" void sc_panorama_free(sc_panorama *panorama) {
     if (panorama == nullptr) return;
     std::free(panorama->pixels);
     *panorama = sc_panorama{};
+}
+
+extern "C" int32_t sc_inscribed_rectangle(const uint8_t *mask, int32_t width, int32_t height, int32_t bytes_per_row,
+                                          int32_t *rect) {
+    if (mask == nullptr || rect == nullptr || width < 1 || height < 1 || bytes_per_row < width) return 0;
+    try {
+        const cv::Mat m(height, width, CV_8U, const_cast<uint8_t *>(mask), size_t(bytes_per_row));
+        const cv::Rect r = inscribed_rectangle(m);
+        rect[0] = r.x;
+        rect[1] = r.y;
+        rect[2] = r.width;
+        rect[3] = r.height;
+        return r.empty() ? 0 : 1;
+    } catch (const std::exception &) {
+        return 0;
+    }
 }

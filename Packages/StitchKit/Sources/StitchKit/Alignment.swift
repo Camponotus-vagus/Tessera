@@ -1,0 +1,381 @@
+import CStitchCore
+import Foundation
+import simd
+
+/// The correspondences that drive global alignment, one set per verified pair of the main group.
+struct AlignmentProblem: Sendable {
+    struct Pair: Sendable {
+        /// Indices into `images`, a < b.
+        var a: Int
+        var b: Int
+        /// (ax, ay, bx, by) per correspondence, full-resolution pixels.
+        var points: [Float]
+        var sigmas: [Float]
+        /// a -> b, row-major, from the refit; starts the homography solver.
+        var homography: [Double]
+        /// RootSIFT inliers alone, when there are enough: rotation bundle adjustment weights every point
+        /// equally and SIFT localises better than the learned keypoints.
+        var siftPoints: [Float]
+        var siftSigmas: [Float]
+
+        var count: Int { points.count / 4 }
+    }
+
+    var images: [SourceImage]
+    var pairs: [Pair]
+    /// Verification threshold per image, in its full-resolution pixels.
+    var thresholds: [Double]
+
+    /// Union of the verified matchers' inliers per pair, without duplicates, checked by one homography
+    /// refit and capped to `cap` points spread over the photo.
+    static func build(_ report: MatchReport, component: [Int], cap: Int = 300) -> AlignmentProblem {
+        let images = component.compactMap { id in report.images.first { $0.id == id } }
+        let index = Dictionary(uniqueKeysWithValues: images.enumerated().map { ($1.id, $0) })
+        let configuration = report.configuration
+        let thresholds = images.map {
+            configuration.inlierThreshold * (Double($0.pixelSize.width * $0.pixelSize.height) / 1_000_000).squareRoot()
+        }
+        var grouped: [PairProposal.Key: [PairEvidence]] = [:]
+        for evidence in report.pairs where evidence.verdict == .verified && evidence.chosenFit != nil {
+            guard let a = index[evidence.a], let b = index[evidence.b] else { continue }
+            grouped[PairProposal.Key(a, b), default: []].append(evidence)
+        }
+
+        var pairs: [Pair] = []
+        for key in grouped.keys.sorted() {
+            let sources = grouped[key]!.sorted { $0.source.rawValue < $1.source.rawValue }
+            var candidates: [(point: SIMD4<Float>, sigma: Float)] = []
+            var perSource: [(source: FeatureSource, points: [SIMD4<Float>], sigma: Float, transform: [Double])] = []
+            for evidence in sources {
+                guard let fit = evidence.chosenFit else { continue }
+                let sigma = Float(max(0.5, fit.rmse))
+                let flipped = index[evidence.a] != key.a
+                let points = fit.inliers.compactMap { i -> SIMD4<Float>? in
+                    guard evidence.matches.indices.contains(Int(i)) else { return nil }
+                    let m = evidence.matches[Int(i)]
+                    let (p, q) = flipped ? (m.b, m.a) : (m.a, m.b)
+                    return SIMD4(p.x, p.y, q.x, q.y)
+                }
+                let transform = flipped ? inverse(fit.transform) : fit.transform
+                perSource.append((evidence.source, points, sigma, transform))
+                candidates += points.map { ($0, sigma) }
+            }
+            guard let best = perSource.max(by: { $0.points.count < $1.points.count }) else { continue }
+            let threshold = thresholds[key.b]
+            var union = deduplicate(candidates, radius: Float(0.5 * threshold))
+            var homography = best.transform
+            if let refit = refit(union, threshold: threshold, seed: configuration.seed) {
+                union = refit.kept
+                homography = refit.homography
+            }
+            // When the matchers disagree, the refit keeps few points: trust the best one alone.
+            if Double(union.count) < 0.9 * Double(best.points.count) {
+                union = best.points.map { ($0, best.sigma) }
+                homography = best.transform
+            }
+            let spread = stratified(union, size: images[key.a].pixelSize, cap: cap)
+            let sift = perSource.first { $0.source == .rootSIFT }
+            let siftSpread = sift.flatMap { set in
+                set.points.count >= 40
+                    ? stratified(set.points.map { ($0, set.sigma) }, size: images[key.a].pixelSize, cap: cap) : nil
+            }
+            pairs.append(Pair(
+                a: key.a, b: key.b,
+                points: spread.flatMap { [$0.point.x, $0.point.y, $0.point.z, $0.point.w] },
+                sigmas: spread.map(\.sigma), homography: homography,
+                siftPoints: siftSpread?.flatMap { [$0.point.x, $0.point.y, $0.point.z, $0.point.w] } ?? [],
+                siftSigmas: siftSpread?.map(\.sigma) ?? []
+            ))
+        }
+        return AlignmentProblem(images: images, pairs: pairs, thresholds: thresholds)
+    }
+
+    /// Keeps the more precise of two correspondences that land within `radius` of each other in both photos.
+    static func deduplicate(_ points: [(point: SIMD4<Float>, sigma: Float)], radius: Float)
+        -> [(point: SIMD4<Float>, sigma: Float)] {
+        guard radius > 0 else { return points }
+        var kept: [(point: SIMD4<Float>, sigma: Float)] = []
+        var cells: [SIMD2<Int>: [Int]] = [:]
+        for candidate in points.sorted(by: { $0.sigma < $1.sigma }) {
+            let cell = SIMD2(Int((candidate.point.x / radius).rounded(.down)), Int((candidate.point.y / radius).rounded(.down)))
+            var duplicate = false
+            search: for dx in -1...1 {
+                for dy in -1...1 {
+                    for k in cells[cell &+ SIMD2(dx, dy), default: []] {
+                        let d = abs(kept[k].point - candidate.point)
+                        if max(d.x, d.y) < radius && max(d.z, d.w) < radius {
+                            duplicate = true
+                            break search
+                        }
+                    }
+                }
+            }
+            guard !duplicate else { continue }
+            cells[cell, default: []].append(kept.count)
+            kept.append(candidate)
+        }
+        return kept
+    }
+
+    /// One homography over the union; its inliers and the matrix, or nil when the fit fails.
+    static func refit(_ points: [(point: SIMD4<Float>, sigma: Float)], threshold: Double, seed: Int32)
+        -> (kept: [(point: SIMD4<Float>, sigma: Float)], homography: [Double])? {
+        guard points.count >= 8 else { return nil }
+        let a = points.flatMap { [$0.point.x, $0.point.y] }, b = points.flatMap { [$0.point.z, $0.point.w] }
+        var mask = [UInt8](repeating: 0, count: points.count)
+        let fit = sc_fit_model(a, b, Int32(points.count), SC_MODEL_HOMOGRAPHY, threshold, 5000, 0.999, seed, &mask)
+        guard fit.ok != 0 else { return nil }
+        let transform = withUnsafeBytes(of: fit.transform) { Array($0.bindMemory(to: Double.self)) }
+        return (points.indices.filter { mask[$0] != 0 }.map { points[$0] }, transform)
+    }
+
+    /// At most `cap` points, taken in turn from an 8 x 8 grid over photo a so they cover it evenly.
+    static func stratified(_ points: [(point: SIMD4<Float>, sigma: Float)], size: PixelSize, cap: Int)
+        -> [(point: SIMD4<Float>, sigma: Float)] {
+        guard points.count > cap else { return points }
+        var buckets = [[(point: SIMD4<Float>, sigma: Float)]](repeating: [], count: 64)
+        for p in points {
+            let gx = min(7, max(0, Int(p.point.x / Float(max(size.width, 1)) * 8)))
+            let gy = min(7, max(0, Int(p.point.y / Float(max(size.height, 1)) * 8)))
+            buckets[gy * 8 + gx].append(p)
+        }
+        for i in buckets.indices { buckets[i].sort { $0.sigma < $1.sigma } }
+        var result: [(point: SIMD4<Float>, sigma: Float)] = []
+        var round = 0
+        while result.count < cap {
+            var added = false
+            for bucket in buckets where round < bucket.count && result.count < cap {
+                result.append(bucket[round])
+                added = true
+            }
+            if !added { break }
+            round += 1
+        }
+        return result
+    }
+
+    static func inverse(_ rowMajor: [Double]) -> [Double] {
+        let m = PlaneGeometry.matrix(rowMajor)
+        guard abs(m.determinant) > 1e-12 else { return rowMajor }
+        let i = m.inverse
+        return [i[0, 0], i[1, 0], i[2, 0], i[0, 1], i[1, 1], i[2, 1], i[0, 2], i[1, 2], i[2, 2]]
+    }
+
+    /// Whether the pairs connect every image.
+    func isConnected(without removed: Set<Int> = []) -> Bool {
+        let edges = pairs.indices.filter { !removed.contains($0) }.map { PairProposal.Key(pairs[$0].a, pairs[$0].b) }
+        return PairProposal.components(Array(images.indices), edges: edges).count == 1
+    }
+}
+
+/// The outcome of global alignment.
+struct Alignment: Sendable {
+    var model: GlobalModel
+    var anchor: Int
+    /// Per photo, row-major: planar models map photo pixels to the mosaic (the anchor's pixels);
+    /// rotation holds cv::detail's camera rotation.
+    var transforms: [[Double]]
+    var focals: [Double]
+    var rms: Double
+    var pairRMS: [Double]
+    /// Rotation: 0 ray bundle adjustment, 1 focal fixed at the prior.
+    var method: Int32
+}
+
+enum Aligner {
+    /// Solves `model` once. Throws with the solver's message when it fails.
+    static func solve(_ model: GlobalModel, _ problem: AlignmentProblem, anchor: Int, straighten: Bool = true)
+        throws -> Alignment {
+        let n = problem.images.count
+        let native: sc_align_model = switch model {
+        case .translation: SC_ALIGN_TRANSLATION
+        case .similarity: SC_ALIGN_SIMILARITY
+        case .affine: SC_ALIGN_AFFINE
+        case .homography: SC_ALIGN_HOMOGRAPHY
+        case .rotation: SC_ALIGN_ROTATION
+        }
+        // Rotation: SIFT points alone where a pair has enough, and fewer points per pair as the group grows,
+        // because the bundle adjuster's Jacobian is dense.
+        let useSIFT = model == .rotation
+        let cap = model == .rotation ? min(300, max(40, Int(1.4e6 / Double(max(1, n * problem.pairs.count))))) : Int.max
+        var flat: [Float] = [], sigmas: [Float] = []
+        var ranges: [(offset: Int, count: Int)] = []
+        for pair in problem.pairs {
+            let points = useSIFT && !pair.siftPoints.isEmpty ? pair.siftPoints : pair.points
+            let weights = useSIFT && !pair.siftPoints.isEmpty ? pair.siftSigmas : pair.sigmas
+            let count = min(points.count / 4, cap)
+            ranges.append((sigmas.count, count))
+            flat += points.prefix(count * 4)
+            sigmas += weights.prefix(count)
+        }
+        let images = problem.images.map { image -> sc_align_image in
+            // 35 mm equivalent focal length by the diagonal (CIPA): 43.27 mm for the full-frame diagonal.
+            let diagonal = (Double(image.pixelSize.width * image.pixelSize.width
+                                   + image.pixelSize.height * image.pixelSize.height)).squareRoot()
+            let focal = image.focalLength35mm.map { $0 * diagonal / 43.2666 } ?? 0
+            return sc_align_image(width: Int32(image.pixelSize.width), height: Int32(image.pixelSize.height), focal: focal)
+        }
+        var transforms = [Double](repeating: 0, count: 9 * n)
+        var focals = [Double](repeating: 0, count: n)
+        var pairRMS = [Double](repeating: 0, count: problem.pairs.count)
+        var result = sc_align_result()
+        var message = [CChar](repeating: 0, count: 512)
+        let status = flat.withUnsafeBufferPointer { points in
+            sigmas.withUnsafeBufferPointer { weights in
+                let pairs = zip(problem.pairs, ranges).map { pair, range in
+                    let h = pair.homography
+                    return sc_align_pair(a: Int32(pair.a), b: Int32(pair.b), count: Int32(range.count),
+                                         points: points.baseAddress! + 4 * range.offset,
+                                         sigma: weights.baseAddress! + range.offset,
+                                         homography: (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]))
+                }
+                return sc_align(native, images, Int32(n), pairs, Int32(pairs.count), Int32(anchor),
+                                model == .rotation && straighten ? 2 : -1, &transforms, &focals, &pairRMS, &result,
+                                &message, message.count)
+            }
+        }
+        guard status == 0, result.ok != 0 else { throw StitchError.engine(errorText(message)) }
+        return Alignment(model: model, anchor: anchor, transforms: (0..<n).map { Array(transforms[(9 * $0)..<(9 * $0 + 9)]) },
+                         focals: focals, rms: result.rms, pairRMS: pairRMS, method: result.iterations)
+    }
+
+    /// Worst corner stretch of a planar solution seen from `anchor`'s plane.
+    static func stretch(_ alignment: Alignment, _ problem: AlignmentProblem, anchor: Int) -> Double {
+        let flat = alignment.transforms.flatMap { $0 }
+        let sizes = problem.images.flatMap { [Int32($0.pixelSize.width), Int32($0.pixelSize.height)] }
+        return sc_alignment_stretch(flat, sizes, Int32(problem.images.count), Int32(anchor))
+    }
+
+    /// Homographies onto the photo whose plane stretches the others least (min-max over corners).
+    static func homographies(_ problem: AlignmentProblem, anchor: Int) throws -> (Alignment, stretch: Double) {
+        var alignment = try solve(.homography, problem, anchor: anchor)
+        let ranked = problem.images.indices.map { ($0, stretch(alignment, problem, anchor: $0)) }
+        if let best = ranked.min(by: { $0.1 < $1.1 }), best.0 != anchor, best.1.isFinite {
+            if let better = try? solve(.homography, problem, anchor: best.0) { alignment = better }
+        }
+        return (alignment, stretch(alignment, problem, anchor: alignment.anchor))
+    }
+
+    /// Picks the global model for `mode` (strategy: the simplest model within a tolerance of the best fit,
+    /// a rotation only when its focal length is plausible), then drops at most two pairs that disagree with
+    /// the rest while the group stays connected.
+    /// Returns the problem without the pairs it dropped.
+    static func align(_ problem: AlignmentProblem, mode: StitchMode, centre: Int, straighten: Bool) throws
+        -> (Alignment, AlignmentProblem, notes: [String]) {
+        var notes: [String] = []
+        var problem = problem
+        var alignment = try choose(problem, mode: mode, centre: centre, straighten: straighten, notes: &notes)
+        for _ in 0..<2 {
+            let sorted = alignment.pairRMS.sorted()
+            guard problem.pairs.count >= problem.images.count, let median = sorted.dropFirst(sorted.count / 2).first,
+                  let worst = alignment.pairRMS.indices.max(by: { alignment.pairRMS[$0] < alignment.pairRMS[$1] })
+            else { break }
+            let pair = problem.pairs[worst]
+            let limit = max(3 * median, problem.thresholds[pair.b])
+            guard alignment.pairRMS[worst] > limit, problem.isConnected(without: [worst]) else { break }
+            notes.append(String(format: "%@ and %@ were left out of the alignment (%.1f px off the others)",
+                                problem.images[pair.a].name, problem.images[pair.b].name, alignment.pairRMS[worst]))
+            problem.pairs.remove(at: worst)
+            alignment = try solve(alignment.model, problem, anchor: alignment.anchor, straighten: straighten)
+        }
+        return (alignment, problem, notes)
+    }
+
+    private static func choose(_ problem: AlignmentProblem, mode: StitchMode, centre: Int, straighten: Bool,
+                               notes: inout [String]) throws -> Alignment {
+        func simplest(_ fits: [Alignment]) -> Alignment? {
+            guard let best = fits.map(\.rms).min() else { return nil }
+            let tolerance = 1.25 * best + 0.5
+            return fits.first { $0.rms <= tolerance }
+        }
+        let overstretch = 4.0
+        switch mode {
+        case .plane:
+            let fits = [GlobalModel.translation, .similarity, .affine].compactMap { try? solve($0, problem, anchor: centre) }
+            guard let chosen = simplest(fits) else { throw StitchError.engine("The tiles could not be aligned") }
+            if let (document, stretch) = try? homographies(problem, anchor: centre), stretch < overstretch,
+               document.rms < 0.7 * chosen.rms, chosen.rms - document.rms > 1 {
+                notes.append(String(format: "The photos show perspective: Document mode would align them to %.1f px instead of %.1f px",
+                                    document.rms, chosen.rms))
+            }
+            return chosen
+        case .document:
+            let (document, stretch) = try homographies(problem, anchor: centre)
+            guard stretch.isFinite else {
+                throw StitchError.engine("The photos do not lie on one plane: try Rotation mode")
+            }
+            if stretch > overstretch {
+                notes.append("Some photos are stretched a lot on the reference plane: Rotation mode may suit them better")
+            }
+            return document
+        case .rotation:
+            do {
+                return try solve(.rotation, problem, anchor: centre, straighten: straighten)
+            } catch {
+                guard let (document, stretch) = try? homographies(problem, anchor: centre), stretch < overstretch else {
+                    throw error
+                }
+                notes.append("The photos do not fit a rotating camera; they were joined as a flat document")
+                return document
+            }
+        case .auto:
+            let planar = [GlobalModel.translation, .similarity, .affine].compactMap { try? solve($0, problem, anchor: centre) }
+            let document = try? homographies(problem, anchor: centre)
+            let rotation = try? solve(.rotation, problem, anchor: centre, straighten: straighten)
+            let all = planar.map(\.rms) + [document?.0.rms, rotation?.rms].compactMap { $0 }
+            guard let best = all.min() else { throw StitchError.engine("No global model fits these photos") }
+            let tolerance = 1.25 * best + 0.5
+            let byModel = Dictionary(uniqueKeysWithValues: planar.map { ($0.model, $0) })
+            if let t = byModel[.translation], t.rms <= tolerance { return t }
+            if let s = byModel[.similarity], s.rms <= tolerance { return s }
+            let documentStretched = document.map { !$0.stretch.isFinite || $0.stretch > overstretch } ?? true
+            if let rotation, rotation.rms <= max(tolerance, 1.5 * (document?.0.rms ?? .infinity) + 1) || documentStretched {
+                return rotation
+            }
+            if let a = byModel[.affine], a.rms <= tolerance { return a }
+            if let document, !documentStretched { return document.0 }
+            if let rotation { return rotation }
+            throw StitchError.engine("No global model fits these photos")
+        }
+    }
+}
+
+/// What global alignment found, for diagnostics.
+public struct AlignmentSummary: Sendable {
+    public var model: GlobalModel
+    public var rms: Double
+    public var anchor: String
+    /// (photo a, photo b, RMS transfer error) per pair used.
+    public var pairs: [(String, String, Double)]
+    public var focals: [Double]
+    public var notes: [String]
+}
+
+extension StitchEngine {
+    /// Aligns the main group of `report` without compositing.
+    public nonisolated func align(_ report: MatchReport, straighten: Bool = true) throws -> AlignmentSummary {
+        let (problem, alignment, notes) = try Self.alignment(for: report, straighten: straighten)
+        return AlignmentSummary(
+            model: alignment.model, rms: alignment.rms, anchor: problem.images[alignment.anchor].name,
+            pairs: zip(problem.pairs, alignment.pairRMS).map { (problem.images[$0.a].name, problem.images[$0.b].name, $1) },
+            focals: alignment.focals, notes: notes
+        )
+    }
+
+    static func alignment(for report: MatchReport, straighten: Bool) throws
+        -> (AlignmentProblem, Alignment, [String]) {
+        guard let component = report.graph.components.first, component.count >= 2 else {
+            throw StitchError.nothingToStitch
+        }
+        let problem = AlignmentProblem.build(report, component: component)
+        guard problem.pairs.count >= problem.images.count - 1, problem.isConnected() else {
+            throw StitchError.nothingToStitch
+        }
+        let verified = report.evidence(filter: .best).filter { $0.verdict == .verified }
+        let centreID = GraphLayout.centre(of: component, edges: verified)
+        let centre = problem.images.firstIndex { $0.id == centreID } ?? 0
+        let (alignment, pruned, notes) = try Aligner.align(problem, mode: report.configuration.mode, centre: centre,
+                                                           straighten: straighten)
+        return (pruned, alignment, notes)
+    }
+}
