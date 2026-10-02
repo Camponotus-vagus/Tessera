@@ -1,0 +1,37 @@
+# Build output
+DerivedData/
+.build/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+Tessera.xcodeproj/
+
+# Large third-party binaries and model weights (fetched by scripts)
+Vendor/
+Models/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local test photos and generated output
+TestData/real/
+Output/
+
+# macOS
+.DS_Store
+
+# Secrets
+.env
+
+# Temporary OpenCV sample images (delete when no longer needed)
+TestData/opencv-samples/
+
+# App bundle built by tools/make-app.sh
+build/
+
+# Model export workspace (cloned sources and venv)
+tools/export/.venv/
+tools/export/LightGlue-ONNX/
+tools/export/weights/
+tools/export/.venv-coreml/

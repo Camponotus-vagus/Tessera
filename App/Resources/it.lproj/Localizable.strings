@@ -1,0 +1,129 @@
+/* Italian translation. Keys are the English strings used in the source. */
+
+/* Menus and toolbar */
+"New Session" = "Nuova sessione";
+"Analysis" = "Analisi";
+"Analyze" = "Analizza";
+"Graph View" = "Vista Grafo";
+"Pair View" = "Vista Coppia";
+"Import" = "Importa";
+"View" = "Vista";
+"Graph" = "Grafo";
+"Pair" = "Coppia";
+"Export Report" = "Esporta report";
+"Settings" = "Impostazioni";
+"Error" = "Errore";
+
+/* Empty states and status */
+"Ready to analyse" = "Pronto per l'analisi";
+"%lld photos imported. Press Analyze to find how they connect." = "%lld foto importate. Premi Analizza per trovare i punti di unione.";
+"No photos" = "Nessuna foto";
+"Drop the photos to join here, or import them." = "Trascina qui le foto da unire, oppure importale.";
+"Import Photos…" = "Importa foto…";
+"Needs a new analysis" = "Da rianalizzare";
+"Analysing…" = "Analisi in corso…";
+"RootSIFT keypoints" = "Punti RootSIFT";
+"RaCo-ALIKED keypoints" = "Punti RaCo-ALIKED";
+"Choosing pairs" = "Scelta delle coppie";
+"RootSIFT matching" = "Match RootSIFT";
+"LightGlue matching" = "Match LightGlue";
+"Geometric verification" = "Verifica geometrica";
+"Pairs between separate groups" = "Coppie tra gruppi separati";
+
+/* Sidebar */
+"Photos (%lld)" = "Foto (%lld)";
+"Include" = "Includi";
+"Exclude" = "Escludi";
+"Groups" = "Gruppi";
+"Main: %lld photos" = "Principale: %lld foto";
+"Group %lld: %@" = "Gruppo %lld: %@";
+"joined" = "unita";
+"%lld keypoints" = "%lld punti";
+"Excluded from the analysis" = "Esclusa dall'analisi";
+"Included in the analysis" = "Inclusa nell'analisi";
+
+/* Graph view */
+"Show" = "Mostra";
+"Photo footprints" = "Impronte delle foto";
+"Rejected pairs" = "Coppie scartate";
+"Failed attempts" = "Tentativi falliti";
+"verified" = "verificata";
+"rejected" = "scartata";
+"failed" = "fallita";
+"%@ ↔ %@: %lld inliers of %lld matches, %@. Click to open." = "%1$@ ↔ %2$@: %3$lld inlier su %4$lld match, %5$@. Clic per aprire.";
+
+/* Pair view */
+"Layers" = "Livelli";
+"Keypoints" = "Punti";
+"Tentative" = "Tentativi";
+"Inliers" = "Inlier";
+"Outliers" = "Outlier";
+"Overlap" = "Sovrapposizione";
+"Choose a pair" = "Scegli una coppia";
+"From the menu above, or click an edge in the graph." = "Dal menu qui sopra o con un clic su un arco del grafo.";
+"%@ ↔ %@  ·  %lld inliers  ·  %@" = "%1$@ ↔ %2$@  ·  %3$lld inlier  ·  %4$@";
+"%lld matches, %lld inliers" = "%1$lld match, %2$lld inlier";
+"mean error %.1f px" = "errore medio %.1f px";
+"coverage %.0f%%" = "copertura %.0f%%";
+"Expected number of false alarms: below 1, chance does not explain the pair." = "Numero atteso di falsi allarmi: sotto 1 la coppia non è spiegabile dal caso.";
+"Pinch to zoom, drag to pan, double-click to reset" = "Pinch per lo zoom, trascina per spostare, doppio clic per tornare all'inizio";
+"score %.2f" = "punteggio %.2f";
+"error %.1f px" = "errore %.1f px";
+
+/* Settings */
+"Scene" = "Scena";
+"Mode" = "Modo";
+"Models not found: see the README." = "Modelli non trovati: vedi il README.";
+"Extractor" = "Estrattore";
+"Matcher precision" = "Precisione matcher";
+"fp16 (faster)" = "fp16 (più veloce)";
+"fp32 (same as ONNX)" = "fp32 (identica a ONNX)";
+"Less memory for ONNX Runtime" = "Meno memoria per ONNX Runtime";
+"Pairs" = "Coppie";
+"Compare" = "Da confrontare";
+"Candidates" = "Candidate";
+"All" = "Tutte";
+"With more than 4 photos: consecutive shots, best neighbours by descriptor affinity, and pairs that join groups left apart." = "Con più di 4 foto: scatti consecutivi, migliori vicini per affinità dei descrittori e coppie che collegano gruppi rimasti separati.";
+"Neighbours per photo" = "Vicini per foto";
+"Thresholds" = "Soglie";
+"Tolerance" = "Tolleranza";
+"%.1f px at 1 MP" = "%.1f px a 1 MP";
+"Minimum inliers" = "Inlier minimi";
+"SIFT resolution" = "Risoluzione SIFT";
+"Result" = "Risultato";
+"Joined photos" = "Foto unite";
+"%lld of %lld" = "%1$lld di %2$lld";
+"Verified pairs" = "Coppie verificate";
+"Pairs compared" = "Coppie confrontate";
+"Time" = "Tempo";
+"Tries translation, similarity, affine and homography, and keeps the simplest model that explains the matches." = "Prova traslazione, similitudine, affine e omografia, e tiene il modello più semplice che spiega i match.";
+"The camera rotates in place: homography between pairs." = "La fotocamera ruota sul posto: omografia tra le coppie.";
+"Tiles of a plane moved under the lens: translation, similarity or affine." = "Tasselli di un piano spostato sotto l'obiettivo: traslazione, similitudine o affine.";
+"A flat original photographed in pieces from different viewpoints: affine or homography." = "Un originale piano ripreso a pezzi da punti diversi: affine o omografia.";
+
+/* Modes, models, sources and verdicts */
+"Automatic" = "Automatico";
+"Rotation (landscape)" = "Rotazione (paesaggio)";
+"Plane (microscope, trays)" = "Piano (microscopio, cassette)";
+"Document" = "Documento";
+"translation" = "traslazione";
+"similarity" = "similitudine";
+"affine" = "affine";
+"homography" = "omografia";
+"Best" = "Migliore";
+"too few matches" = "troppo pochi match";
+"no consistent model" = "nessun modello coerente";
+"implausible transform" = "trasformazione implausibile";
+"inliers on a thin strip" = "inlier concentrati in una striscia";
+"not distinguishable from chance" = "non distinguibile dal caso";
+"perspective change, not plane tiles" = "cambio di prospettiva, non tasselli di un piano";
+"cannot be read" = "illeggibile";
+"too few features" = "pochi punti caratteristici";
+"no verified pair" = "nessuna coppia verificata";
+"weak links only" = "solo collegamenti deboli";
+"separate group" = "gruppo separato";
+"excluded" = "esclusa";
+"Automatic (Core ML)" = "Automatico (Core ML)";
+"These files could not be read and were not added: %@" = "Questi file non si leggono e non sono stati aggiunti: %@";
+"Turn on at least one matcher." = "Attiva almeno un matcher.";
+"Stop" = "Interrompi";
