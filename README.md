@@ -6,11 +6,11 @@ When a stitcher fails, it often says little more than "not enough similarities".
 
 ![Panorama view: four photos of a box of pinned ants joined into one image, with the outline of each photo](docs/images/panorama-view.jpg)
 
-![Graph view: six photos of an insect drawer placed where they sit in the mosaic, with the inlier count on each verified pair](docs/images/graph-view.jpg)
+![Graph view: six photos of an insect drawer placed where they sit in the mosaic, with the inlier count on each pair, green when verified and orange when rejected](docs/images/graph-view.jpg)
 
 ![Pair view: inliers in green and outliers in red between two neighbouring photos, with the overlap outlined](docs/images/pair-view.jpg)
 
-Hundreds of near-identical labels in a box of pinned ants. LightGlue still finds 211 consistent matches, and the a-contrario test confirms them:
+Hundreds of near-identical labels in a box of pinned ants. LightGlue still finds 200 consistent matches, and the a-contrario test confirms them:
 
 ![Pair view on a box of pinned ants with repeated labels](docs/images/pair-view-repeated-labels.jpg)
 
