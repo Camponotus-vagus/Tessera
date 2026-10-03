@@ -100,12 +100,19 @@ private struct GraphCanvas: View {
                 for pair in visible {
                     drawEdge(context, pair: pair, placement: placement, map: map, maxInliers: maxInliers)
                 }
-                // Counts after every line, so that no edge crosses another edge's count.
-                for pair in visible {
-                    drawBadge(context, pair: pair, placement: placement, map: map)
-                }
+                var taken: [CGRect] = []
                 for image in report.images {
-                    drawNode(context, image: image, placement: placement, map: map, width: nodeWidth)
+                    taken += drawNode(context, image: image, placement: placement, map: map, width: nodeWidth)
+                }
+                // Counts last, so that no line or photo covers them, and verified pairs first, so that they
+                // keep the middle of their edge when two counts or a photo compete for it.
+                let ranked = visible.sorted {
+                    ($0.verdict == .verified ? 1 : 0, $0.inlierCount) > ($1.verdict == .verified ? 1 : 0, $1.inlierCount)
+                }
+                for pair in ranked {
+                    if let badge = drawBadge(context, pair: pair, placement: placement, map: map, avoiding: taken) {
+                        taken.append(badge)
+                    }
                 }
             }
             .contentShape(Rectangle())
@@ -180,18 +187,33 @@ private struct GraphCanvas: View {
         }
     }
 
-    private func drawBadge(_ context: GraphicsContext, pair: PairEvidence, placement: NodePlacement, map: ViewMapping) {
-        guard let a = placement.centers[pair.a], let b = placement.centers[pair.b] else { return }
+    /// Draws the pair's count on its edge, at the middle or, when that is covered, at the first point along
+    /// the edge clear of `taken` (photos, their names and counts already drawn), or else where it covers
+    /// them least. Returns where it went.
+    private func drawBadge(
+        _ context: GraphicsContext, pair: PairEvidence, placement: NodePlacement, map: ViewMapping, avoiding taken: [CGRect]
+    ) -> CGRect? {
+        guard let a = placement.centers[pair.a], let b = placement.centers[pair.b] else { return nil }
         let start = map(a), end = map(b)
-        guard pair.inlierCount > 0 || hovered == PairID(pair.a, pair.b) else { return }
-        let middle = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
+        guard pair.inlierCount > 0 || hovered == PairID(pair.a, pair.b) else { return nil }
         let label = context.resolve(Text("\(pair.inlierCount)").font(.caption.monospacedDigit().bold())
             .foregroundStyle(.white))
         let size = label.measure(in: CGSize(width: 200, height: 40))
-        let badge = CGRect(x: middle.x - size.width / 2 - 6, y: middle.y - size.height / 2 - 2,
-                           width: size.width + 12, height: size.height + 4)
-        context.fill(Capsule().path(in: badge), with: .color(pair.verdict.color.opacity(0.9)))
-        context.draw(label, at: middle)
+        func badge(at t: Double) -> CGRect {
+            let x = start.x + (end.x - start.x) * t, y = start.y + (end.y - start.y) * t
+            return CGRect(x: x - size.width / 2 - 6, y: y - size.height / 2 - 2, width: size.width + 12, height: size.height + 4)
+        }
+        let candidates = [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8].map(badge(at:))
+        func covered(_ candidate: CGRect) -> Double {
+            taken.reduce(0) { total, other in
+                let overlap = other.intersection(candidate)
+                return overlap.isNull ? total : total + overlap.width * overlap.height
+            }
+        }
+        let rect = candidates.first { covered($0) == 0 } ?? candidates.min { covered($0) < covered($1) }!
+        context.fill(Capsule().path(in: rect), with: .color(pair.verdict.color.opacity(0.9)))
+        context.draw(label, at: CGPoint(x: rect.midX, y: rect.midY))
+        return rect
     }
 
     /// Thumbnails shrink when photos sit close together, so edges and their badges stay visible.
@@ -206,14 +228,13 @@ private struct GraphCanvas: View {
         return nearest.isFinite ? max(44, min(120, nearest * 0.5)) : 120
     }
 
+    /// Draws the photo and its name, and returns the rectangles they cover.
     private func drawNode(
         _ context: GraphicsContext, image: SourceImage, placement: NodePlacement, map: ViewMapping, width: Double
-    ) {
-        guard let center = placement.centers[image.id] else { return }
-        let point = map(center)
+    ) -> [CGRect] {
+        guard let rect = nodeRect(image, placement: placement, map: map, width: width) else { return [] }
+        let point = CGPoint(x: rect.midX, y: rect.midY)
         let node = report.graph.nodes.first { $0.id == image.id }
-        let height = width * Double(image.pixelSize.height) / Double(max(image.pixelSize.width, 1))
-        let rect = CGRect(x: point.x - width / 2, y: point.y - height / 2, width: width, height: height)
         let shape = RoundedRectangle(cornerRadius: 6).path(in: rect)
         if let thumbnail = session.thumbnails[image.id] {
             var clipped = context
@@ -231,6 +252,16 @@ private struct GraphCanvas: View {
         if let reason = node?.exclusion { caption += "\n" + reason.label }
         let text = context.resolve(Text(caption).font(.caption2).foregroundStyle(.primary))
         context.draw(text, at: CGPoint(x: point.x, y: rect.maxY + 4), anchor: .top)
+        let size = text.measure(in: CGSize(width: 400, height: 100))
+        return [rect, CGRect(x: point.x - size.width / 2, y: rect.maxY + 4, width: size.width, height: size.height)]
+    }
+
+    /// The photo's thumbnail on the canvas, without its caption.
+    private func nodeRect(_ image: SourceImage, placement: NodePlacement, map: ViewMapping, width: Double) -> CGRect? {
+        guard let center = placement.centers[image.id] else { return nil }
+        let point = map(center)
+        let height = width * Double(image.pixelSize.height) / Double(max(image.pixelSize.width, 1))
+        return CGRect(x: point.x - width / 2, y: point.y - height / 2, width: width, height: height)
     }
 
     // MARK: Hit testing
