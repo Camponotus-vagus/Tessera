@@ -18,8 +18,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// partial files to be removed.
     @MainActor var cancelModelDownload: (() -> Task<Void, Never>?)?
 
+    /// The file passed on to SwiftUI, which comes back through `application(_:open:)` and is already open.
+    @MainActor private var forwarded: URL?
+
+    /// SwiftUI answers an "open documents" event by bringing forward and laying out the window once for every
+    /// file: with 552 files opened from Finder the window took 47 seconds to appear. All the files go to the
+    /// session at once, and SwiftUI sees only the first, which is enough to open or raise its window.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(openDocuments(_:withReply:)),
+            forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEOpenDocuments))
+    }
+
+    @MainActor @objc private func openDocuments(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {
+        guard let list = event.paramDescriptor(forKeyword: keyDirectObject) else { return }
+        let items = list.numberOfItems > 0 ? (1...list.numberOfItems).compactMap { list.atIndex($0) } : [list]
+        let urls = items.compactMap { $0.coerce(toDescriptorType: typeFileURL)?.fileURLValue }
+        guard let first = urls.first else { return }
+        application(NSApp, open: urls)
+        forwarded = first
+        NSApp.delegate?.application?(NSApp, open: [first])
+    }
+
     @MainActor
     func application(_ application: NSApplication, open urls: [URL]) {
+        if let forwarded, urls == [forwarded] {
+            self.forwarded = nil
+            return
+        }
         if let openFiles {
             openFiles(urls)
         } else {
