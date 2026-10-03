@@ -18,7 +18,7 @@ Hundreds of near-identical labels in a box of pinned ants. LightGlue still finds
 
 Tessera runs on Macs with Apple Silicon (M1 or later) and macOS 15 Sequoia or later.
 
-1. Download `Tessera-0.1.0.dmg` from the [latest release](https://github.com/Camponotus-vagus/Tessera/releases/latest), open it and drag Tessera to Applications.
+1. Download `Tessera-0.1.1.dmg` from the [latest release](https://github.com/Camponotus-vagus/Tessera/releases/latest), open it and drag Tessera to Applications.
 2. Open Tessera. The first time, macOS refuses to open it and says it could not verify that Tessera is free of malware. This happens because Tessera is signed without a paid Apple Developer ID, so Apple has not notarized it. Click Done.
 3. Open System Settings, go to Privacy & Security and scroll down to Security. Next to "Tessera was blocked to protect your Mac", click Open Anyway and confirm with your password. macOS remembers this, and Tessera opens normally from then on.
 
@@ -28,7 +28,7 @@ If you prefer the Terminal, removing the quarantine flag that macOS puts on down
 xattr -dr com.apple.quarantine /Applications/Tessera.app
 ```
 
-The release also lists the SHA-256 of each file in `SHA256SUMS`, so you can check your download with `shasum -a 256 Tessera-0.1.0.dmg`.
+The release also lists the SHA-256 of each file in `SHA256SUMS`, so you can check your download with `shasum -a 256 Tessera-0.1.1.dmg`.
 
 ## First launch
 
