@@ -12,6 +12,8 @@ struct StoredPixels: Sendable {
     var orientation: Int32
     /// RGBX, 16 bits per channel, little-endian.
     var pixels: [UInt16]
+    /// The file stores more than 8 bits per component.
+    var highBitDepth = false
     var bytesPerRow: Int { width * 8 }
 }
 
@@ -41,7 +43,8 @@ extension ImageLoader {
         let width = swapped ? target.height : target.width, height = swapped ? target.width : target.height
         let full = try draw(decoded, space: space, url: image.url)
         if width == decoded.width && height == decoded.height {
-            return StoredPixels(width: width, height: height, orientation: orientation, pixels: full)
+            return StoredPixels(width: width, height: height, orientation: orientation, pixels: full,
+                                highBitDepth: decoded.bitsPerComponent > 8)
         }
         var pixels = [UInt16](unsafeUninitializedCapacity: width * height * 4) { _, count in count = width * height * 4 }
         let status = full.withUnsafeBufferPointer { input in
@@ -54,7 +57,8 @@ extension ImageLoader {
             }
         }
         guard status == kvImageNoError else { throw StitchError.cannotDecode(image.url) }
-        return StoredPixels(width: width, height: height, orientation: orientation, pixels: pixels)
+        return StoredPixels(width: width, height: height, orientation: orientation, pixels: pixels,
+                            highBitDepth: decoded.bitsPerComponent > 8)
     }
 
     /// RGBX, 16 bits per channel, of `image` at its own size in `space`, transparent areas white.
@@ -395,15 +399,19 @@ extension StitchEngine {
         timings.seams = (ContinuousClock.now - clock).seconds
         clock = ContinuousClock.now
         progress?(ProgressEvent(stage: "compose", completed: 0, total: images.count))
+        var highBitDepth = false
         for (index, image) in images.enumerated() {
             try Task.checkCancellation()
-            try compositor.addImage(index, ImageLoader.stored(image, target: compositor.imageSize(index), space: space))
+            let stored = try ImageLoader.stored(image, target: compositor.imageSize(index), space: space)
+            highBitDepth = highBitDepth || stored.highBitDepth
+            try compositor.addImage(index, stored)
             progress?(ProgressEvent(stage: "compose", completed: index + 1, total: images.count))
         }
         timings.compositing = (ContinuousClock.now - clock).seconds
         clock = ContinuousClock.now
         progress?(ProgressEvent(stage: "blend", completed: 0, total: 0))
-        let result = try compositor.finish(space: space)
+        var result = try compositor.finish(space: space)
+        result.0.highBitDepth = highBitDepth
         timings.blending = (ContinuousClock.now - clock).seconds
         return result
     }

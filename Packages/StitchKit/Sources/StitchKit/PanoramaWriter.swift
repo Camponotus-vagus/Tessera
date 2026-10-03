@@ -60,6 +60,8 @@ public struct PanoramaPixels: Sendable {
     public var iccProfile: Data?
     /// Every pixel is covered: the alpha channel can be dropped.
     public var opaque: Bool
+    /// Made from photos with more than 8 bits per component, which `levels` may stretch.
+    public var highBitDepth = false
 
     public init(width: Int, height: Int, bitsPerComponent: Int, pixels: Data, iccProfile: Data?, opaque: Bool = false) {
         self.width = width
@@ -77,20 +79,63 @@ public struct PanoramaPixels: Sendable {
         return CGColorSpace(name: CGColorSpace.sRGB)!
     }
 
+    /// For a panorama of photos with more than 8 bits per component whose pixels fill less than half of the
+    /// scale, as scientific cameras often leave them, the 0.1th and 99.9th percentiles of the covered pixels
+    /// (from about a million samples); nil otherwise. 8-bit copies spread that range over 0-255, or they would
+    /// look black; 16-bit ones keep the values.
+    func levels() -> (low: Int, high: Int)? {
+        guard highBitDepth, bitsPerComponent == 16, width > 0, height > 0, pixels.count >= bytesPerRow * height
+        else { return nil }
+        let step = max(1, Int((Double(width * height) / 1_000_000).squareRoot()))
+        var histogram = [Int](repeating: 0, count: 65536)
+        var total = 0
+        pixels.withUnsafeBytes { raw in
+            let values = raw.bindMemory(to: UInt16.self)
+            for y in stride(from: 0, to: height, by: step) {
+                for x in stride(from: 0, to: width, by: step) {
+                    let i = (y * width + x) * 4
+                    guard opaque || UInt16(littleEndian: values[i + 3]) > 0 else { continue }
+                    for c in 0..<3 { histogram[Int(UInt16(littleEndian: values[i + c]))] += 1 }
+                    total += 3
+                }
+            }
+        }
+        guard total > 0 else { return nil }
+        func percentile(_ q: Double) -> Int {
+            let goal = Int(q * Double(total))
+            var seen = 0
+            for (value, count) in histogram.enumerated() {
+                seen += count
+                if seen > goal { return value }
+            }
+            return 65535
+        }
+        let low = percentile(0.001), high = percentile(0.999)
+        return high > low && high - low < 32768 ? (low, high) : nil
+    }
+
     /// The pixels as a CGImage over the same memory, without alpha when `opaque` (or when `crop`, which must
-    /// hold no transparent pixel, is given).
-    func sourceImage(crop: PixelRect? = nil) throws -> CGImage {
+    /// hold no transparent pixel, is given). `levels` maps that range of the samples onto the full scale.
+    func sourceImage(crop: PixelRect? = nil, levels: (low: Int, high: Int)? = nil) throws -> CGImage {
         guard pixels.count >= bytesPerRow * height, width > 0, height > 0 else {
             throw StitchError.engine(String(localized: "Panorama buffer is smaller than its size"))
         }
-        let alpha: CGImageAlphaInfo = opaque || crop != nil ? .noneSkipLast : .last
+        // CoreGraphics ignores a decode array on 16-bit pixels whose alpha is skipped and draws them flat, so
+        // stretched copies keep the alpha, which is full wherever the image is opaque.
+        let alpha: CGImageAlphaInfo = (opaque || crop != nil) && levels == nil ? .noneSkipLast : .last
         let info: CGBitmapInfo = bitsPerComponent == 16
             ? [CGBitmapInfo(rawValue: alpha.rawValue), .byteOrder16Little]
             : CGBitmapInfo(rawValue: alpha.rawValue)
+        // Sample s decodes to lower + s / 65535 * (upper - lower): low maps to 0 and high to 1; alpha as it is.
+        let decode: [CGFloat]? = levels.map { levels in
+            let low = CGFloat(levels.low) / 65535, span = CGFloat(levels.high - levels.low) / 65535
+            let lower = -low / span, upper = (1 - low) / span
+            return [lower, upper, lower, upper, lower, upper, 0, 1]
+        }
         guard let provider = CGDataProvider(data: pixels as CFData),
               let source = CGImage(width: width, height: height, bitsPerComponent: bitsPerComponent,
                                    bitsPerPixel: 4 * bitsPerComponent, bytesPerRow: bytesPerRow, space: colorSpace,
-                                   bitmapInfo: info, provider: provider, decode: nil, shouldInterpolate: false,
+                                   bitmapInfo: info, provider: provider, decode: decode, shouldInterpolate: false,
                                    intent: .defaultIntent)
         else { throw StitchError.engine(String(localized: "Cannot describe the panorama as an image")) }
         guard let crop else { return source }
@@ -98,11 +143,12 @@ public struct PanoramaPixels: Sendable {
         return cropped
     }
 
-    /// The pixels as a CGImage, optionally cropped, converted to 8 bits and flattened onto `background`.
+    /// The pixels as a CGImage, optionally cropped, converted to `target` bits (8-bit copies stretched as
+    /// `levels` says) and flattened onto `background`.
     func cgImage(bitsPerComponent target: Int, flattenOnto background: CGColor? = nil, crop: PixelRect? = nil) throws
         -> CGImage {
-        let source = try sourceImage(crop: crop)
-        let opaqueSource = source.alphaInfo == .noneSkipLast
+        let source = try sourceImage(crop: crop, levels: target == 8 ? levels() : nil)
+        let opaqueSource = opaque || crop != nil
         guard target != bitsPerComponent || (background != nil && !opaqueSource) else { return source }
         let width = source.width, height = source.height
 
@@ -126,7 +172,7 @@ public struct PanoramaPixels: Sendable {
 
     /// An 8-bit copy with the long side at most `longSide`, for display.
     public func preview(longSide: Int = 4096, crop: PixelRect? = nil) throws -> CGImage {
-        let source = try sourceImage(crop: crop)
+        let source = try sourceImage(crop: crop, levels: levels())
         let factor = min(1, Double(longSide) / Double(max(source.width, source.height)))
         let width = max(1, Int((Double(source.width) * factor).rounded()))
         let height = max(1, Int((Double(source.height) * factor).rounded()))

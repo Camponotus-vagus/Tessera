@@ -90,6 +90,16 @@ enum ImageLoader {
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             throw StitchError.cannotDecode(url)
         }
+        // A scientific photo that fills a small part of its 16 bits would look black: show it stretched.
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        if image.bitsPerComponent > 8, let pixels = stretched(image, space: space),
+           let provider = CGDataProvider(data: Data(pixels) as CFData),
+           let shown = CGImage(width: image.width, height: image.height, bitsPerComponent: 8, bitsPerPixel: 32,
+                               bytesPerRow: image.width * 4, space: space,
+                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                               provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent) {
+            return shown
+        }
         return image
     }
 
@@ -136,17 +146,22 @@ enum ImageLoader {
         let space = CGColorSpace(name: CGColorSpace.sRGB)!
         let info = CGImageAlphaInfo.noneSkipLast.rawValue
         var width = decoded.width, height = decoded.height
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
-            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
-                                          bytesPerRow: width * 4, space: space, bitmapInfo: info) else { return false }
-            // Transparent areas become white, as in a viewer.
-            context.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
-            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-            context.draw(decoded, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return true
+        var pixels: [UInt8]
+        if decoded.bitsPerComponent > 8, let stretched = stretched(decoded, space: space) {
+            pixels = stretched
+        } else {
+            pixels = [UInt8](repeating: 0, count: width * height * 4)
+            let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+                guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                              bytesPerRow: width * 4, space: space, bitmapInfo: info) else { return false }
+                // Transparent areas become white, as in a viewer.
+                context.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
+                context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+                context.draw(decoded, in: CGRect(x: 0, y: 0, width: width, height: height))
+                return true
+            }
+            guard drawn else { throw StitchError.cannotDecode(image.url) }
         }
-        guard drawn else { throw StitchError.cannotDecode(image.url) }
         if width != goal.width || height != goal.height {
             var reduced = [UInt8](repeating: 0, count: goal.width * goal.height * 4)
             let done = pixels.withUnsafeBufferPointer { input in
@@ -167,6 +182,46 @@ enum ImageLoader {
                                    provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
         else { throw StitchError.cannotDecode(image.url) }
         return result
+    }
+
+    /// RGBA8 pixels of a photo with more than 8 bits per component that fills less than half of its scale,
+    /// stretched from its 0.1th to its 99.9th percentile; nil for any other photo, to be drawn as it is.
+    /// Scientific cameras store 12 to 16 bits and often use a small part of them: drawn at 8 bits, a
+    /// phase-contrast tile spanning 3600-5500 of 65535 keeps about seven grey levels, too few for features.
+    static func stretched(_ image: CGImage, space: CGColorSpace) -> [UInt8]? {
+        let width = image.width, height = image.height
+        var wide = [UInt16](repeating: 0, count: width * height * 4)
+        let drawn = wide.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 16,
+                                          bytesPerRow: width * 8, space: space,
+                                          bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue)
+            else { return false }
+            context.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
+        var histogram = [Int](repeating: 0, count: 65536)
+        for i in wide.indices where i % 4 != 3 { histogram[Int(wide[i])] += 1 }
+        let total = width * height * 3
+        func percentile(_ q: Double) -> Int {
+            let goal = Int(q * Double(total))
+            var seen = 0
+            for (value, count) in histogram.enumerated() {
+                seen += count
+                if seen > goal { return value }
+            }
+            return 65535
+        }
+        let low = percentile(0.001), high = percentile(0.999)
+        guard high > low, high - low < 32768 else { return nil }
+        let scale = 255 / Double(high - low)
+        var pixels = [UInt8](repeating: 255, count: width * height * 4)
+        for i in wide.indices where i % 4 != 3 {
+            pixels[i] = UInt8(max(0, min(255, ((Double(wide[i]) - Double(low)) * scale).rounded())))
+        }
+        return pixels
     }
 
     /// Four-byte pixels as stored, turned the way a viewer shows them for EXIF orientation 1-8 (the same
