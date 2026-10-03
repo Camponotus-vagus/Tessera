@@ -10,13 +10,10 @@
 "View" = "Vista";
 "Graph" = "Grafo";
 "Pair" = "Coppia";
-"Export Report" = "Esporta report";
 "Settings" = "Impostazioni";
 "Error" = "Errore";
 
 /* Empty states and status */
-"Ready to analyse" = "Pronto per l'analisi";
-"%lld photos imported. Press Analyze to find how they connect." = "%lld foto importate. Premi Analizza per trovare i punti di unione.";
 "No photos" = "Nessuna foto";
 "Drop the photos to join here, or import them." = "Trascina qui le foto da unire, oppure importale.";
 "Import Photos…" = "Importa foto…";
@@ -256,3 +253,8 @@
 "The panorama would be %lld × %lld pixels: it can be at most %lld per side" = "Il panorama sarebbe di %lld × %lld pixel: al massimo se ne possono avere %lld per lato";
 "The photos cannot be laid on one plane: try Rotation mode" = "Le foto non si possono stendere su un unico piano: prova il modo Rotazione";
 "The panorama would be %lld × %lld pixels: the alignment is probably wrong, try another mode" = "Il panorama sarebbe di %lld × %lld pixel: probabilmente l'allineamento è sbagliato, prova un altro modo";
+"Ratio test" = "Ratio test";
+"Match %lld" = "Match %lld";
+"inlier" = "inlier";
+"outlier" = "outlier";
+"Matcher" = "Matcher";
