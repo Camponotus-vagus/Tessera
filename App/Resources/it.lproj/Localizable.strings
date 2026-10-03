@@ -215,6 +215,7 @@
 "Some photos are stretched a lot on the reference plane: Rotation mode may suit them better" = "Alcune foto risultano molto stirate sul piano di riferimento: il modo Rotazione potrebbe andare meglio";
 "The photos do not fit a rotating camera; they were joined as a flat document" = "Le foto non corrispondono a una camera che ruota: sono state unite come un documento piano";
 "No global model fits these photos" = "Nessun modello globale descrive queste foto";
+"No model fits these photos closely: the alignment error is %.1f times the error allowed within each pair" = "Nessun modello descrive bene queste foto: l'errore di allineamento è %.1f volte quello ammesso in ogni coppia";
 "The panorama is empty" = "Il panorama è vuoto";
 "Full 360-degree panoramas are not supported yet" = "I panorami completi a 360 gradi non sono ancora supportati";
 "The photos span %.0f degrees: too wide for a rectilinear projection" = "Le foto coprono %.0f gradi: troppi per una proiezione rettilinea";

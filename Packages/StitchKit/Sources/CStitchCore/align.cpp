@@ -465,18 +465,18 @@ cv::Matx33d camera_homography(const cv::detail::CameraParams &a, const cv::detai
     return cv::Matx33d(H.ptr<double>());
 }
 
-bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair> &pairs, int wave,
-                    std::vector<cv::detail::CameraParams> &cameras, int &method, std::string &problem) {
-    std::vector<cv::Size> sizes(n);
-    for (int i = 0; i < n; ++i) sizes[i] = cv::Size(images[i].width, images[i].height);
-
-    std::vector<cv::detail::ImageFeatures> features(n);
-    std::vector<cv::detail::MatchesInfo> matches(static_cast<size_t>(n) * n);
+// cv::detail's bundle adjusters read keypoints and matches: every correspondence becomes a pair of keypoints.
+void detail_problem(const std::vector<cv::Size> &sizes, const std::vector<Pair> &pairs,
+                    std::vector<cv::detail::ImageFeatures> &features, std::vector<cv::detail::MatchesInfo> &matches,
+                    std::vector<double> &homography_focals) {
+    const int n = static_cast<int>(sizes.size());
+    features.assign(n, cv::detail::ImageFeatures());
+    matches.assign(static_cast<size_t>(n) * n, cv::detail::MatchesInfo());
+    homography_focals.clear();
     for (int i = 0; i < n; ++i) {
         features[i].img_idx = i;
         features[i].img_size = sizes[i];
     }
-    std::vector<double> homography_focals;
     for (const Pair &pair : pairs) {
         cv::detail::MatchesInfo info;
         info.src_img_idx = pair.a;
@@ -506,6 +506,50 @@ bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair>
         matches[static_cast<size_t>(pair.a) * n + pair.b] = info;
         matches[static_cast<size_t>(pair.b) * n + pair.a] = reverse;
     }
+}
+
+// The pairs without the correspondences far off the cameras' fit, or empty when there is nothing to refit.
+// The limit is three times the median error, and at least 2 px. A pair that would keep fewer than 8 of its
+// points (or fewer than all of them, when it has fewer than 8) mostly shows something that moved: it is left
+// out of the refit. Nothing is trimmed when no point is beyond the limit, when more than 30% are, or when
+// the pairs left no longer join every photo.
+std::vector<Pair> trimmed(int n, const std::vector<Pair> &pairs, const std::vector<cv::detail::CameraParams> &cameras) {
+    std::vector<std::vector<double>> errors(pairs.size());
+    std::vector<double> all;
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        const cv::Matx33d H = camera_homography(cameras[pairs[p].a], cameras[pairs[p].b]);
+        for (const Correspondence &c : pairs[p].points) {
+            cv::Vec2d q;
+            errors[p].push_back(apply(H, c.a, q) ? cv::norm(q - c.b) : INFINITY);
+            all.push_back(errors[p].back());
+        }
+    }
+    const double limit = std::max(3 * median(all), 2.0);
+    std::vector<Pair> kept;
+    size_t removed = 0;
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        Pair pair = pairs[p];
+        pair.points.clear();
+        for (size_t k = 0; k < pairs[p].points.size(); ++k) {
+            if (errors[p][k] <= limit) pair.points.push_back(pairs[p].points[k]);
+        }
+        removed += pairs[p].points.size() - pair.points.size();
+        if (pair.points.size() >= std::min<size_t>(8, pairs[p].points.size())) kept.push_back(std::move(pair));
+    }
+    if (removed == 0 || removed > 0.3 * all.size()) return {};
+    if (spanning_order(n, kept, 0).size() != size_t(n - 1)) return {};
+    return kept;
+}
+
+bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair> &pairs, int wave,
+                    std::vector<cv::detail::CameraParams> &cameras, int &method, std::string &problem) {
+    std::vector<cv::Size> sizes(n);
+    for (int i = 0; i < n; ++i) sizes[i] = cv::Size(images[i].width, images[i].height);
+
+    std::vector<cv::detail::ImageFeatures> features;
+    std::vector<cv::detail::MatchesInfo> matches;
+    std::vector<double> homography_focals;
+    detail_problem(sizes, pairs, features, matches, homography_focals);
 
     // Focal prior: EXIF for every photo, else the homographies, else 72 degrees across the long side.
     std::vector<double> priors(n);
@@ -552,32 +596,77 @@ bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair>
         return *hi <= 1.05 * *lo || !exif;
     };
 
+    // Method 0 refines focal lengths and rotations, for at most `iterations`; method 1 keeps the focal fixed
+    // at the prior, with the adjuster's own stopping rule.
+    auto adjust = [&](int kind, const std::vector<cv::detail::ImageFeatures> &f,
+                      const std::vector<cv::detail::MatchesInfo> &m, std::vector<cv::detail::CameraParams> &c,
+                      int iterations = 200) {
+        cv::Ptr<cv::detail::BundleAdjusterBase> adjuster;
+        if (kind == 0) {
+            adjuster = cv::makePtr<cv::detail::BundleAdjusterRay>();
+            adjuster->setTermCriteria(
+                cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, iterations, 1e-8));
+        } else {
+            adjuster = cv::makePtr<cv::detail::BundleAdjusterReproj>();
+            adjuster->setRefinementMask(cv::Mat::zeros(3, 3, CV_8U));
+        }
+        adjuster->setConfThresh(1.0);
+        try {
+            return (*adjuster)(f, m, c) && plausible(c);
+        } catch (const cv::Exception &) {
+            return false;
+        }
+    };
     method = 0;
-    cv::Ptr<cv::detail::BundleAdjusterBase> ray = cv::makePtr<cv::detail::BundleAdjusterRay>();
-    ray->setConfThresh(1.0);
-    ray->setTermCriteria(cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 200, 1e-8));
-    bool ok = false;
-    try {
-        ok = (*ray)(features, matches, cameras) && plausible(cameras);
-    } catch (const cv::Exception &) {
-        ok = false;
-    }
+    bool ok = adjust(0, features, matches, cameras);
     if (!ok) {
-        // Keep the focal fixed at the prior and refine the rotations only.
         method = 1;
         cameras = initial;
-        cv::Ptr<cv::detail::BundleAdjusterBase> fixed = cv::makePtr<cv::detail::BundleAdjusterReproj>();
-        fixed->setConfThresh(1.0);
-        fixed->setRefinementMask(cv::Mat::zeros(3, 3, CV_8U));
-        try {
-            ok = (*fixed)(features, matches, cameras) && plausible(cameras);
-        } catch (const cv::Exception &) {
-            ok = false;
-        }
+        ok = adjust(1, features, matches, cameras);
     }
     if (!ok) {
         problem = "the camera focal length does not fit the matches (not a rotating camera?)";
         return false;
+    }
+    // The ray adjuster weighs every match alike, so whatever moved between shots (water, people) pulls the
+    // whole panorama: refit once from its result without the matches far off it. Not with the focal length
+    // fixed at the prior, where the errors measure the wrong focal length more than anything that moved.
+    if (method == 0) {
+        try {
+            const std::vector<Pair> kept = trimmed(n, pairs, cameras);
+            if (!kept.empty()) {
+                detail_problem(sizes, kept, features, matches, homography_focals);
+                std::vector<cv::detail::CameraParams> refit = cameras;
+                if (adjust(0, features, matches, refit, 20)) {
+                    // The adjuster fixes the photo at the centre of its spanning tree, which the trimmed
+                    // matches can move: keep the first result's reference photo where it was.
+                    int reference = 0;
+                    double closest = INFINITY;
+                    for (int i = 0; i < n; ++i) {
+                        cv::Mat R;
+                        cameras[i].R.convertTo(R, CV_64F);
+                        const double d = cv::norm(R, cv::Mat::eye(3, 3, CV_64F));
+                        if (d < closest) {
+                            closest = d;
+                            reference = i;
+                        }
+                    }
+                    cv::Mat first, second;
+                    cameras[reference].R.convertTo(first, CV_64F);
+                    refit[reference].R.convertTo(second, CV_64F);
+                    const cv::Mat gauge = first * second.t();
+                    for (auto &camera : refit) {
+                        cv::Mat R;
+                        camera.R.convertTo(R, CV_64F);
+                        R = gauge * R;
+                        R.convertTo(camera.R, CV_32F);
+                    }
+                    cameras = refit;
+                }
+            }
+        } catch (const std::exception &) {
+            // The refit is optional: keep the first result.
+        }
     }
 
     // Wave correction levels the horizon; it needs a wide enough sweep to know where "up" is.
@@ -624,6 +713,7 @@ extern "C" int32_t sc_align(sc_align_model model, const sc_align_image *images, 
             sizes[i] = cv::Size(images[i].width, images[i].height);
         }
         std::vector<Pair> list;
+        std::vector<int> origin;  // index in `pairs` of each entry of `list`
         for (int p = 0; p < pair_count; ++p) {
             const sc_align_pair &in = pairs[p];
             if (in.a < 0 || in.b < 0 || in.a >= image_count || in.b >= image_count || in.a == in.b ||
@@ -637,8 +727,18 @@ extern "C" int32_t sc_align(sc_align_model model, const sc_align_image *images, 
                 if (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2]) || !std::isfinite(v[3])) continue;
                 pair.points.push_back({cv::Vec2d(v[0], v[1]), cv::Vec2d(v[2], v[3]), sigma});
             }
-            if (!pair.points.empty()) list.push_back(std::move(pair));
+            if (!pair.points.empty()) {
+                list.push_back(std::move(pair));
+                origin.push_back(p);
+            }
         }
+        // A pair without a finite point gets an error of 0.
+        std::vector<double> list_rms(list.size(), 0.0);
+        auto report_pairs = [&] {
+            if (!pair_rms) return;
+            std::fill(pair_rms, pair_rms + pair_count, 0.0);
+            for (size_t p = 0; p < list.size(); ++p) pair_rms[origin[p]] = list_rms[p];
+        };
         // Every photo must be reachable from the anchor.
         if (spanning_order(image_count, list, anchor).size() != size_t(image_count - 1)) {
             write_error(error, error_length, "the pairs do not connect every photo");
@@ -672,10 +772,11 @@ extern "C" int32_t sc_align(sc_align_model model, const sc_align_image *images, 
                     const double e = apply(H, c.a, q) ? cv::norm(q - c.b) : 1e6;
                     sum += e * e;
                 }
-                if (pair_rms) pair_rms[p] = std::sqrt(sum / list[p].points.size());
+                list_rms[p] = std::sqrt(sum / list[p].points.size());
                 total += sum;
                 count += list[p].points.size();
             }
+            report_pairs();
             result->ok = 1;
             result->rms = count ? std::sqrt(total / count) : 0;
             result->iterations = method;
@@ -689,7 +790,8 @@ extern "C" int32_t sc_align(sc_align_model model, const sc_align_image *images, 
             return 1;
         }
         double rms = 0;
-        transfer_errors(G, list, pair_rms, rms);
+        transfer_errors(G, list, list_rms.data(), rms);
+        report_pairs();
         for (int i = 0; i < image_count; ++i) store(G[i], transforms + 9 * i);
         result->ok = 1;
         result->rms = rms;

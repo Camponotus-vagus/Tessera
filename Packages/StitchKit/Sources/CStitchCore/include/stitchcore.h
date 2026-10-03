@@ -203,7 +203,8 @@ typedef struct {
 /// row-major 3x3 map from its pixels to the mosaic, which is the anchor's pixel frame. Rotation writes
 /// cv::detail's camera rotation R (world ray = R K^-1 p, K with the principal point at the photo centre)
 /// and the focal length in `focals`. `wave`: -1 none, 0 horizontal, 1 vertical, 2 automatic.
-/// `pair_rms` (optional) receives each pair's RMS transfer error.
+/// `pair_rms` (optional, `pair_count` entries) receives the RMS transfer error of each element of `pairs`, in
+/// the same order, and 0 for a pair without a finite correspondence. It is written only when sc_align returns 0.
 int32_t sc_align(sc_align_model model, const sc_align_image *images, int32_t image_count,
                  const sc_align_pair *pairs, int32_t pair_count, int32_t anchor, int32_t wave, double *transforms,
                  double *focals, double *pair_rms, sc_align_result *result, char *error, size_t error_length);

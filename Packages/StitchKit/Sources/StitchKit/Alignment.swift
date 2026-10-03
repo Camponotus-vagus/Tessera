@@ -257,28 +257,84 @@ enum Aligner {
     }
 
     /// Picks the global model for `mode` (strategy: the simplest model within a tolerance of the best fit,
-    /// a rotation only when its focal length is plausible), then drops at most two pairs that disagree with
-    /// the rest while the group stays connected.
+    /// a rotation only when its focal length is plausible), then drops pairs that disagree with the rest while
+    /// the group stays connected: at least two, and at most a quarter of the pairs beyond a spanning tree.
     /// Returns the problem without the pairs it dropped.
     static func align(_ problem: AlignmentProblem, mode: StitchMode, centre: Int, straighten: Bool) throws
         -> (Alignment, AlignmentProblem, notes: [String]) {
-        var notes: [String] = []
         var problem = problem
-        var alignment = try choose(problem, mode: mode, centre: centre, straighten: straighten, notes: &notes)
-        for _ in 0..<2 {
+        var modelNotes: [String] = []
+        var alignment = try choose(problem, mode: mode, centre: centre, straighten: straighten, notes: &modelNotes)
+        // A new choice of model, or nil when it fails for any reason but cancellation.
+        func chooseAgain(_ problem: AlignmentProblem) throws -> (Alignment, [String])? {
+            var notes: [String] = []
+            do {
+                return (try choose(problem, mode: mode, centre: centre, straighten: straighten, notes: &notes), notes)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return nil
+            }
+        }
+        var dropped: [String] = []
+        var stale = false
+        let limit = max(2, (problem.pairs.count - (problem.images.count - 1)) / 4)
+        while dropped.count < limit {
+            try Task.checkCancellation()
             let sorted = alignment.pairRMS.sorted()
             guard problem.pairs.count >= problem.images.count, let median = sorted.dropFirst(sorted.count / 2).first,
                   let worst = alignment.pairRMS.indices.max(by: { alignment.pairRMS[$0] < alignment.pairRMS[$1] })
             else { break }
             let pair = problem.pairs[worst]
-            let limit = max(3 * median, problem.thresholds[pair.b])
-            guard alignment.pairRMS[worst] > limit, problem.isConnected(without: [worst]) else { break }
-            notes.append(String(format: String(localized: "The pair %@ ↔ %@ was left out of the alignment (%.1f px off the others)"),
-                                locale: .current, problem.images[pair.a].name, problem.images[pair.b].name, alignment.pairRMS[worst]))
-            problem.pairs.remove(at: worst)
-            alignment = try solve(alignment.model, problem, anchor: alignment.anchor, straighten: straighten)
+            guard alignment.pairRMS[worst] > max(3 * median, problem.thresholds[pair.b]),
+                  problem.isConnected(without: [worst]) else { break }
+            var reduced = problem
+            reduced.pairs.remove(at: worst)
+            // Without an outlier the same model fits better. When it fits worse, it leaned on the pair (a
+            // rotation the pair made look plausible, say): choose the model again.
+            let next: Alignment
+            if let resolved = try? solve(alignment.model, reduced, anchor: alignment.anchor, straighten: straighten),
+               resolved.rms <= alignment.rms {
+                next = resolved
+                stale = true
+            } else if let (chosen, notes) = try chooseAgain(reduced) {
+                next = chosen
+                modelNotes = notes
+                stale = false
+            } else {
+                break
+            }
+            dropped.append(String(format: String(localized: "The pair %@ ↔ %@ was left out of the alignment (%.1f px off the others)"),
+                                  locale: .current, problem.images[pair.a].name, problem.images[pair.b].name, alignment.pairRMS[worst]))
+            problem = reduced
+            alignment = next
         }
-        return (alignment, problem, notes)
+        // The model was chosen with the pairs now left out.
+        if stale, let (chosen, notes) = try chooseAgain(problem) {
+            alignment = chosen
+            modelNotes = notes
+        }
+        // Each pair was verified to within its own inlier threshold: a global fit looser than that has not joined them.
+        if !alignment.pairRMS.isEmpty {
+            let ratios = zip(alignment.pairRMS, problem.pairs).map { $0 / problem.thresholds[$1.b] }
+            let excess = (ratios.map { $0 * $0 }.reduce(0, +) / Double(ratios.count)).squareRoot()
+            if excess > 1 {
+                dropped.append(String(format: String(localized: "No model fits these photos closely: the alignment error is %.1f times the error allowed within each pair"),
+                                      locale: .current, excess))
+            }
+        }
+        return (alignment, problem, modelNotes + dropped)
+    }
+
+    /// Beyond this stretch of a photo on the reference plane a homography is not trusted.
+    static let overstretch = 4.0
+
+    /// Whether a homography earns its perspective over the planar fit it is compared with: it stretches no
+    /// photo more than `overstretch` times and halves the planar error. Parallax (specimens on pins, a
+    /// hand-held camera) lowers a homography's error a little while the perspective builds up along a chain
+    /// of photos; a real perspective leaves the planar fits far behind.
+    static func earnsPerspective(documentRMS: Double, stretch: Double, planarRMS: Double) -> Bool {
+        stretch.isFinite && stretch <= overstretch && documentRMS < 0.5 * planarRMS
     }
 
     private static func choose(_ problem: AlignmentProblem, mode: StitchMode, centre: Int, straighten: Bool,
@@ -288,13 +344,16 @@ enum Aligner {
             let tolerance = 1.25 * best + 0.5
             return fits.first { $0.rms <= tolerance }
         }
-        let overstretch = 4.0
         switch mode {
         case .plane:
             let fits = [GlobalModel.translation, .similarity, .affine].compactMap { try? solve($0, problem, anchor: centre) }
+            try Task.checkCancellation()
             guard let chosen = simplest(fits) else { throw StitchError.engine(String(localized: "The tiles could not be aligned")) }
-            if let (document, stretch) = try? homographies(problem, anchor: centre), stretch < overstretch,
-               document.rms < 0.7 * chosen.rms, chosen.rms - document.rms > 1 {
+            // Against the best planar fit: the simplest one may leave an error that an affine fit removes.
+            if let (document, stretch) = try? homographies(problem, anchor: centre),
+               let best = fits.min(by: { $0.rms < $1.rms }),
+               earnsPerspective(documentRMS: document.rms, stretch: stretch, planarRMS: best.rms),
+               best.rms - document.rms > 1 {
                 notes.append(String(format: String(localized: "The photos show perspective: Document mode would align them to %.1f px instead of %.1f px"),
                                     locale: .current, document.rms, chosen.rms))
             }
@@ -320,8 +379,18 @@ enum Aligner {
             }
         case .auto:
             let planar = [GlobalModel.translation, .similarity, .affine].compactMap { try? solve($0, problem, anchor: centre) }
+            try Task.checkCancellation()
+            // The tolerance is at least half a pixel and at most 1.25 times the best planar fit plus half a pixel:
+            // these choices do not need the homographies or the rotation, the slowest of the fits.
+            if let t = planar.first(where: { $0.model == .translation }), t.rms <= 0.5 { return t }
+            if let lowest = planar.map(\.rms).min(), let s = planar.first(where: { $0.model == .similarity }), s.rms <= 0.5,
+               planar.first(where: { $0.model == .translation }).map({ $0.rms > 1.25 * lowest + 0.5 }) ?? true {
+                return s
+            }
             let document = try? homographies(problem, anchor: centre)
+            try Task.checkCancellation()
             let rotation = try? solve(.rotation, problem, anchor: centre, straighten: straighten)
+            try Task.checkCancellation()
             let all = planar.map(\.rms) + [document?.0.rms, rotation?.rms].compactMap { $0 }
             guard let best = all.min() else { throw StitchError.engine(String(localized: "No global model fits these photos")) }
             let tolerance = 1.25 * best + 0.5
@@ -332,7 +401,12 @@ enum Aligner {
             if let rotation, rotation.rms <= max(tolerance, 1.5 * (document?.0.rms ?? .infinity) + 1) || documentStretched {
                 return rotation
             }
-            if let a = byModel[.affine], a.rms <= tolerance { return a }
+            if let a = byModel[.affine] {
+                let earned = document.map {
+                    earnsPerspective(documentRMS: $0.0.rms, stretch: $0.stretch, planarRMS: a.rms)
+                } ?? false
+                if a.rms <= tolerance || !earned { return a }
+            }
             if let document, !documentStretched { return document.0 }
             if let rotation { return rotation }
             throw StitchError.engine(String(localized: "No global model fits these photos"))
