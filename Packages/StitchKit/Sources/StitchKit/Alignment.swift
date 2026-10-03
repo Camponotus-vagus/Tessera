@@ -258,7 +258,7 @@ enum Aligner {
 
     /// Picks the global model for `mode` (strategy: the simplest model within a tolerance of the best fit,
     /// a rotation only when its focal length is plausible), then drops pairs that disagree with the rest while
-    /// the group stays connected: at least two, and at most a quarter of the pairs beyond a spanning tree.
+    /// the group stays connected: up to two, or a quarter of the pairs beyond a spanning tree when that is more.
     /// Returns the problem without the pairs it dropped.
     static func align(_ problem: AlignmentProblem, mode: StitchMode, centre: Int, straighten: Bool) throws
         -> (Alignment, AlignmentProblem, notes: [String]) {

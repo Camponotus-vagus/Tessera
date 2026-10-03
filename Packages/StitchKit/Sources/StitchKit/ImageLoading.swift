@@ -95,7 +95,7 @@ enum ImageLoader {
 
     /// The oriented photo with its long side at `longSide` pixels (never enlarged), resampled so that pixel
     /// centres map as (x + 0.5) * r - 0.5 on each axis, the map the keypoint conversions assume: decoded at a
-    /// power-of-two reduction, which ImageIO does exactly on that map for JPEG, HEIC and PNG, then reduced by
+    /// power-of-two reduction, which ImageIO does exactly on that map for JPEG, HEIC, PNG and TIFF, then reduced by
     /// area averaging, as LightGlue's own image loading does (cv2.INTER_AREA). ImageIO thumbnails do not follow
     /// that map: JPEG ones are reduced corner to corner after the power-of-two step, which shrinks them by up to
     /// 5e-4 at 1024 pixels, and HEIC ones are also shifted unevenly.
