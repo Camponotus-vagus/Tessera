@@ -100,6 +100,10 @@ private struct GraphCanvas: View {
                 for pair in visible {
                     drawEdge(context, pair: pair, placement: placement, map: map, maxInliers: maxInliers)
                 }
+                // Counts after every line, so that no edge crosses another edge's count.
+                for pair in visible {
+                    drawBadge(context, pair: pair, placement: placement, map: map)
+                }
                 for image in report.images {
                     drawNode(context, image: image, placement: placement, map: map, width: nodeWidth)
                 }
@@ -174,7 +178,12 @@ private struct GraphCanvas: View {
             context.stroke(path, with: .color(.secondary.opacity(0.6)),
                            style: StrokeStyle(lineWidth: 1, dash: [2, 4]))
         }
-        guard pair.inlierCount > 0 || isHovered else { return }
+    }
+
+    private func drawBadge(_ context: GraphicsContext, pair: PairEvidence, placement: NodePlacement, map: ViewMapping) {
+        guard let a = placement.centers[pair.a], let b = placement.centers[pair.b] else { return }
+        let start = map(a), end = map(b)
+        guard pair.inlierCount > 0 || hovered == PairID(pair.a, pair.b) else { return }
         let middle = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
         let label = context.resolve(Text("\(pair.inlierCount)").font(.caption.monospacedDigit().bold())
             .foregroundStyle(.white))
