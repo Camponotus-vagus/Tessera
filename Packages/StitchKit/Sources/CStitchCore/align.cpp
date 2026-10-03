@@ -8,8 +8,12 @@
 
 #include "stitchcore.h"
 
+#include <Accelerate/Accelerate.h>
+
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
+#include <map>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -116,6 +120,123 @@ std::vector<std::pair<int, int>> spanning_order(int n, const std::vector<Pair> &
     return order;
 }
 
+// Normal equations with `d` unknowns per photo, coupled only between the photos of a pair: stored by
+// d x d blocks (the lower block triangle, diagonal blocks whole, each block column-major) and solved with
+// Accelerate's sparse Cholesky, analysed once and refactored at every step. Dense, they grew with the cube
+// of the number of photos: 4184 unknowns for 524 homographies.
+class BlockNormalEquations {
+public:
+    BlockNormalEquations(int blocks, int d, const std::vector<std::pair<int, int>> &links) : blocks_(blocks), d_(d) {
+        std::vector<std::vector<int>> rows(blocks);
+        for (int j = 0; j < blocks; ++j) rows[j].push_back(j);
+        for (const auto &[a, b] : links) {
+            if (a < 0 || b < 0 || a == b) continue;
+            rows[std::min(a, b)].push_back(std::max(a, b));
+        }
+        starts_.assign(blocks + 1, 0);
+        for (int j = 0; j < blocks; ++j) {
+            std::sort(rows[j].begin(), rows[j].end());
+            rows[j].erase(std::unique(rows[j].begin(), rows[j].end()), rows[j].end());
+            starts_[j + 1] = starts_[j] + static_cast<long>(rows[j].size());
+            for (int i : rows[j]) {
+                index_[key(i, j)] = static_cast<int>(rows_.size());
+                rows_.push_back(i);
+            }
+        }
+        values_.assign(rows_.size() * d * d, 0.0);
+        rhs_.assign(static_cast<size_t>(blocks) * d, 0.0);
+        symbolic_ = SparseFactor(SparseFactorizationCholesky, structure());
+    }
+
+    ~BlockNormalEquations() { SparseCleanup(symbolic_); }
+    BlockNormalEquations(const BlockNormalEquations &) = delete;
+    BlockNormalEquations &operator=(const BlockNormalEquations &) = delete;
+
+    void clear() {
+        std::fill(values_.begin(), values_.end(), 0.0);
+        std::fill(rhs_.begin(), rhs_.end(), 0.0);
+    }
+
+    // The stored block that holds entries (bi, bj) and (bj, bi): column-major, row bi when bi >= bj.
+    double *block(int bi, int bj) {
+        return values_.data() + static_cast<size_t>(index_.at(key(std::max(bi, bj), std::min(bi, bj)))) * d_ * d_;
+    }
+
+    double &rhs(int k) { return rhs_[k]; }
+
+    // Solves (A + damping * diag(A)) x = rhs; false when the matrix is not positive definite.
+    bool solve(std::vector<double> &x, double damping) const {
+        if (symbolic_.status != SparseStatusOK) return false;
+        std::vector<double> values = values_;
+        if (damping != 0) {
+            for (int j = 0; j < blocks_; ++j) {
+                double *diagonal = values.data() + static_cast<size_t>(index_.at(key(j, j))) * d_ * d_;
+                for (int k = 0; k < d_; ++k) diagonal[k * d_ + k] *= 1 + damping;
+            }
+        }
+        SparseMatrix_Double matrix{structure(), values.data()};
+        SparseOpaqueFactorization_Double factor = SparseFactor(symbolic_, matrix);
+        if (factor.status != SparseStatusOK) {
+            SparseCleanup(factor);
+            return false;
+        }
+        x = rhs_;
+        DenseVector_Double vector{static_cast<int>(x.size()), x.data()};
+        SparseSolve(factor, vector);
+        SparseCleanup(factor);
+        return std::all_of(x.begin(), x.end(), [](double v) { return std::isfinite(v); });
+    }
+
+private:
+    static long long key(int i, int j) { return (static_cast<long long>(i) << 32) | static_cast<unsigned>(j); }
+
+    SparseMatrixStructure structure() const {
+        SparseMatrixStructure structure{};
+        structure.rowCount = blocks_;
+        structure.columnCount = blocks_;
+        structure.columnStarts = const_cast<long *>(starts_.data());
+        structure.rowIndices = const_cast<int *>(rows_.data());
+        structure.attributes.kind = SparseSymmetric;
+        structure.attributes.triangle = SparseLowerTriangle;
+        structure.blockSize = static_cast<uint8_t>(d_);
+        return structure;
+    }
+
+    int blocks_, d_;
+    std::vector<long> starts_;
+    std::vector<int> rows_;
+    std::map<long long, int> index_;
+    std::vector<double> values_, rhs_;
+    SparseOpaqueSymbolicFactorization symbolic_{};
+};
+
+// The blocks of the normal equations that a pair of photos fills (blocks ba and bb, -1 for the
+// anchor): each residual row adds +w Ja^T Ja and +w Jb^T Jb on the diagonal, -w Ja^T Jb across.
+struct PairBlocks {
+    double *aa = nullptr, *bb = nullptr, *ab = nullptr;
+    bool ab_row_a = true;  // the cross block is stored with a's unknowns as rows
+
+    PairBlocks(BlockNormalEquations &system, int ba, int bb_) {
+        if (ba >= 0) aa = system.block(ba, ba);
+        if (bb_ >= 0) bb = system.block(bb_, bb_);
+        if (ba >= 0 && bb_ >= 0) {
+            ab = system.block(ba, bb_);
+            ab_row_a = ba > bb_;
+        }
+    }
+
+    // One residual row: Ja and Jb are its derivatives with respect to a's and b's d unknowns.
+    void add(int d, const double *Ja, const double *Jb, double w) {
+        for (int j = 0; j < d; ++j) {
+            for (int i = 0; i < d; ++i) {
+                if (aa) aa[j * d + i] += w * Ja[i] * Ja[j];
+                if (bb) bb[j * d + i] += w * Jb[i] * Jb[j];
+                if (ab) ab[ab_row_a ? j * d + i : i * d + j] -= w * Ja[i] * Jb[j];
+            }
+        }
+    }
+};
+
 // MARK: Translation, similarity, affine
 
 // M_i(p) = L_i (p - c_i) + t_i for every photo but the anchor, whose M is the identity.
@@ -192,16 +313,31 @@ bool solve_linear(sc_align_model model, const std::vector<cv::Size> &sizes, cons
         apply(M, p, value);
     };
 
+    std::vector<std::pair<int, int>> links;
+    auto block = [&](int image) { return slot[image] < 0 ? -1 : slot[image] / d; };
+    for (const Pair &pair : pairs) links.emplace_back(block(pair.a), block(pair.b));
+    BlockNormalEquations system(unknowns, d, links);
+    // Each photo's linear scale on the mosaic, sqrt |det L|, from the previous pass.
+    std::vector<double> photo_scale(n, 1.0);
     for (iterations = 0; iterations < 8; ++iterations) {
-        cv::Mat A = cv::Mat::zeros(P, P, CV_64F), rhs = cv::Mat::zeros(P, 1, CV_64F);
+        for (int i = 0; i < n; ++i) {
+            if (slot[i] < 0) continue;
+            const cv::Matx33d M = linear_transform(model, theta.data() + slot[i], centre[i]);
+            photo_scale[i] = std::max(1e-3, std::sqrt(std::fabs(M(0, 0) * M(1, 1) - M(0, 1) * M(1, 0))));
+        }
+        system.clear();
         for (const Pair &pair : pairs) {
+            PairBlocks blocks(system, block(pair.a), block(pair.b));
             for (const Correspondence &c : pair.points) {
                 cv::Vec2d ma, mb;
                 evaluate(pair.a, c.a, ma);
                 evaluate(pair.b, c.b, mb);
-                // First pass: plain least squares; then Huber weights on the current residual.
-                const double scaled = iterations == 0 ? 0 : cv::norm(ma - mb) / c.sigma;
-                const double w = huber(scaled) / (c.sigma * c.sigma);
+                // First pass: plain least squares; then Huber weights on the current residual, measured in
+                // the photos' own pixels. In the mosaic's pixels a group of photos held by wrong pairs could
+                // lower its error by shrinking: 191 of 524 drone photos collapsed into a thin strip.
+                const double scale = iterations == 0 ? 1 : 0.5 * (photo_scale[pair.a] + photo_scale[pair.b]);
+                const double scaled = iterations == 0 ? 0 : cv::norm(ma - mb) / (scale * c.sigma);
+                const double w = huber(scaled) / (scale * scale * c.sigma * c.sigma);
                 double Ja[2][6], Jb[2][6];
                 cv::Vec2d ka, kb;
                 linear_rows(model, c.a - centre[pair.a], Ja, ka);
@@ -212,31 +348,22 @@ bool solve_linear(sc_align_model model, const std::vector<cv::Size> &sizes, cons
                 const cv::Vec2d k = ka - kb;
                 const int sa = slot[pair.a], sb = slot[pair.b];
                 for (int r = 0; r < 2; ++r) {
+                    blocks.add(d, Ja[r], Jb[r], w);
                     for (int i = 0; i < d; ++i) {
-                        if (sa >= 0) {
-                            rhs.at<double>(sa + i) -= w * Ja[r][i] * k[r];
-                            for (int j = 0; j < d; ++j) {
-                                A.at<double>(sa + i, sa + j) += w * Ja[r][i] * Ja[r][j];
-                                if (sb >= 0) A.at<double>(sa + i, sb + j) -= w * Ja[r][i] * Jb[r][j];
-                            }
-                        }
-                        if (sb >= 0) {
-                            rhs.at<double>(sb + i) += w * Jb[r][i] * k[r];
-                            for (int j = 0; j < d; ++j) {
-                                A.at<double>(sb + i, sb + j) += w * Jb[r][i] * Jb[r][j];
-                                if (sa >= 0) A.at<double>(sb + i, sa + j) -= w * Jb[r][i] * Ja[r][j];
-                            }
-                        }
+                        if (sa >= 0) system.rhs(sa + i) -= w * Ja[r][i] * k[r];
+                        if (sb >= 0) system.rhs(sb + i) += w * Jb[r][i] * k[r];
                     }
                 }
             }
         }
-        cv::Mat x;
-        if (!cv::solve(A, rhs, x, cv::DECOMP_CHOLESKY) && !cv::solve(A, rhs, x, cv::DECOMP_SVD)) return false;
+        // A degenerate pair (collinear points for an affine fit) leaves the matrix singular: a tiny ridge
+        // then picks the solution closest to the current one in the free directions.
+        std::vector<double> x;
+        if (!system.solve(x, 0) && !system.solve(x, 1e-9)) return false;
         double change = 0;
         for (int i = 0; i < P; ++i) {
-            change = std::max(change, std::fabs(x.at<double>(i) - theta[i]));
-            theta[i] = x.at<double>(i);
+            change = std::max(change, std::fabs(x[i] - theta[i]));
+            theta[i] = x[i];
         }
         if (iterations > 0 && change < 1e-6) break;
     }
@@ -345,12 +472,18 @@ bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pa
     double lambda = 1e-3;
     std::vector<double> weights;
     bool converged = false;
+    std::vector<std::pair<int, int>> links;
+    auto block = [&](int image) { return slot[image] < 0 ? -1 : slot[image] / 8; };
+    for (const Pair &pair : pairs) links.emplace_back(block(pair.a), block(pair.b));
+    BlockNormalEquations system(unknowns, 8, links);
     for (iterations = 0; iterations < 60 && !converged; ++iterations) {
-        // Huber weights on the current residuals, scale factors frozen for this step.
+        // Huber weights on the current residuals, scale factors frozen for this step; the right-hand side
+        // holds -g, the descent direction.
         weights.clear();
-        cv::Mat A = cv::Mat::zeros(P, P, CV_64F), g = cv::Mat::zeros(P, 1, CV_64F);
+        system.clear();
         for (size_t p = 0; p < pairs.size(); ++p) {
             const Pair &pair = pairs[p];
+            PairBlocks blocks(system, block(pair.a), block(pair.b));
             for (const Point &c : normal[p]) {
                 double Ja[2][8], Jb[2][8];
                 cv::Vec2d ma, mb;
@@ -366,21 +499,10 @@ bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pa
                 const cv::Vec2d rm = ma - mb;
                 const int sa_ = slot[pair.a], sb_ = slot[pair.b];
                 for (int row = 0; row < 2; ++row) {
+                    blocks.add(8, Ja[row], Jb[row], w);
                     for (int i = 0; i < 8; ++i) {
-                        if (sa_ >= 0) {
-                            g.at<double>(sa_ + i) += w * Ja[row][i] * rm[row];
-                            for (int j = 0; j < 8; ++j) {
-                                A.at<double>(sa_ + i, sa_ + j) += w * Ja[row][i] * Ja[row][j];
-                                if (sb_ >= 0) A.at<double>(sa_ + i, sb_ + j) -= w * Ja[row][i] * Jb[row][j];
-                            }
-                        }
-                        if (sb_ >= 0) {
-                            g.at<double>(sb_ + i) -= w * Jb[row][i] * rm[row];
-                            for (int j = 0; j < 8; ++j) {
-                                A.at<double>(sb_ + i, sb_ + j) += w * Jb[row][i] * Jb[row][j];
-                                if (sa_ >= 0) A.at<double>(sb_ + i, sa_ + j) -= w * Jb[row][i] * Ja[row][j];
-                            }
-                        }
+                        if (sa_ >= 0) system.rhs(sa_ + i) -= w * Ja[row][i] * rm[row];
+                        if (sb_ >= 0) system.rhs(sb_ + i) += w * Jb[row][i] * rm[row];
                     }
                 }
             }
@@ -388,15 +510,13 @@ bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pa
         const double before = energy(&weights);
         bool improved = false;
         for (int attempt = 0; attempt < 10 && !improved; ++attempt) {
-            cv::Mat damped = A.clone();
-            for (int i = 0; i < P; ++i) damped.at<double>(i, i) *= 1 + lambda;
-            cv::Mat step;
-            if (!cv::solve(damped, -g, step, cv::DECOMP_CHOLESKY)) {
+            std::vector<double> step;
+            if (!system.solve(step, lambda)) {
                 lambda *= 10;
                 continue;
             }
             std::vector<double> candidate = theta;
-            for (int i = 0; i < P; ++i) candidate[i] += step.at<double>(i);
+            for (int i = 0; i < P; ++i) candidate[i] += step[i];
             const std::vector<cv::Matx33d> saved = Hn;
             refresh(candidate);
             const double after = energy(&weights);
@@ -596,8 +716,8 @@ bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair>
         return *hi <= 1.05 * *lo || !exif;
     };
 
-    // Method 0 refines focal lengths and rotations, for at most `iterations`; method 1 keeps the focal fixed
-    // at the prior, with the adjuster's own stopping rule.
+    // Method 0 refines focal lengths and rotations, method 1 only the rotations, the focal length staying at
+    // the prior; both for at most `iterations`.
     auto adjust = [&](int kind, const std::vector<cv::detail::ImageFeatures> &f,
                       const std::vector<cv::detail::MatchesInfo> &m, std::vector<cv::detail::CameraParams> &c,
                       int iterations = 200) {
@@ -607,8 +727,11 @@ bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair>
             adjuster->setTermCriteria(
                 cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, iterations, 1e-8));
         } else {
+            // The adjuster's default allows 1000 iterations, each costing minutes with hundreds of photos.
             adjuster = cv::makePtr<cv::detail::BundleAdjusterReproj>();
             adjuster->setRefinementMask(cv::Mat::zeros(3, 3, CV_8U));
+            adjuster->setTermCriteria(
+                cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, iterations, DBL_EPSILON));
         }
         adjuster->setConfThresh(1.0);
         try {

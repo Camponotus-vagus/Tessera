@@ -166,6 +166,37 @@ struct AlignmentProblem: Sendable {
         let edges = pairs.indices.filter { !removed.contains($0) }.map { PairProposal.Key(pairs[$0].a, pairs[$0].b) }
         return PairProposal.components(Array(images.indices), edges: edges).count == 1
     }
+
+    /// The `count` images reached first from `centre` through the pairs (strongest pairs first), with the
+    /// pairs among them, and the centre's index in it; nil when that leaves no pair.
+    func neighbourhood(of centre: Int, count: Int) -> (problem: AlignmentProblem, centre: Int)? {
+        var chosen = [centre], seen: Set<Int> = [centre]
+        var frontier = [centre]
+        let strongest = pairs.sorted { $0.count > $1.count }
+        while chosen.count < count, !frontier.isEmpty {
+            var next: [Int] = []
+            for image in frontier {
+                for pair in strongest where pair.a == image || pair.b == image {
+                    let other = pair.a == image ? pair.b : pair.a
+                    guard chosen.count < count, seen.insert(other).inserted else { continue }
+                    chosen.append(other)
+                    next.append(other)
+                }
+            }
+            frontier = next
+        }
+        let index = Dictionary(uniqueKeysWithValues: chosen.sorted().enumerated().map { ($1, $0) })
+        let kept = pairs.compactMap { pair -> Pair? in
+            guard let a = index[pair.a], let b = index[pair.b] else { return nil }
+            var copy = pair
+            copy.a = a
+            copy.b = b
+            return copy
+        }
+        guard !kept.isEmpty, let local = index[centre] else { return nil }
+        let order = chosen.sorted()
+        return (AlignmentProblem(images: order.map { images[$0] }, pairs: kept, thresholds: order.map { thresholds[$0] }), local)
+    }
 }
 
 /// The outcome of global alignment.
@@ -329,6 +360,9 @@ enum Aligner {
     /// Beyond this stretch of a photo on the reference plane a homography is not trusted.
     static let overstretch = 4.0
 
+    /// Automatic mode tries the rotation on `size` photos first when there are more than `limit`.
+    static let rotationTrial = (limit: 60, size: 40)
+
     /// Whether a homography earns its perspective over the planar fit it is compared with: it stretches no
     /// photo more than `overstretch` times and halves the planar error. Parallax (specimens on pins, a
     /// hand-held camera) lowers a homography's error a little while the perspective builds up along a chain
@@ -389,7 +423,19 @@ enum Aligner {
             }
             let document = try? homographies(problem, anchor: centre)
             try Task.checkCancellation()
-            let rotation = try? solve(.rotation, problem, anchor: centre, straighten: straighten)
+            // The rotation's bundle adjustment is dense: with hundreds of photos it runs for hours. Above
+            // `rotationTrial` photos it is tried on the ones nearest the centre first, and solved for all
+            // of them only when it wins there.
+            let rotation: Alignment?
+            if problem.images.count > Self.rotationTrial.limit,
+               let trial = problem.neighbourhood(of: centre, count: Self.rotationTrial.size) {
+                var ignored: [String] = []
+                let model = try? choose(trial.problem, mode: .auto, centre: trial.centre, straighten: straighten, notes: &ignored)
+                try Task.checkCancellation()
+                rotation = model?.model == .rotation ? try? solve(.rotation, problem, anchor: centre, straighten: straighten) : nil
+            } else {
+                rotation = try? solve(.rotation, problem, anchor: centre, straighten: straighten)
+            }
             try Task.checkCancellation()
             let all = planar.map(\.rms) + [document?.0.rms, rotation?.rms].compactMap { $0 }
             guard let best = all.min() else { throw StitchError.engine(String(localized: "No global model fits these photos")) }
