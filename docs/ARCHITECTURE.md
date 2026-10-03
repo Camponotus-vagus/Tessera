@@ -20,8 +20,11 @@ Swift never sees C++ types. Everything crosses the boundary as flat float arrays
 
 ### 1. Features
 
-- **RootSIFT**: OpenCV SIFT on a downscaled gray image (1.5 MP by default, up to 6000 keypoints), descriptors L1-normalised and square-rooted. Coordinates are scaled back to the original image.
-- **RaCo-ALIKED**: each photo is fitted, without distortion, into a fixed 1024 x 768 (or 768 x 1024) canvas, and up to three photos are in flight at once. The network is split in three:
+Both matchers work on reduced copies made by `ImageLoader.analysisImage`: the photo is decoded at a power-of-two reduction, which ImageIO does exactly on the pixel-centre map for JPEG, HEIC and PNG, reduced to the working size by area averaging, as LightGlue's own image loading does, and turned upright by its EXIF orientation. ImageIO's thumbnails, used before, do not follow that map: JPEG thumbnails are shrunk by up to 5e-4 at 1024 pixels, which put the two edges of an overlap more than half a pixel apart in full-resolution terms.
+
+
+- **RootSIFT**: OpenCV SIFT on a downscaled gray image (1.5 MP by default, up to 6000 keypoints), descriptors L1-normalised and square-rooted. Coordinates are scaled back to the original image through pixel centres, (x + 0.5) / s - 0.5.
+- **RaCo-ALIKED**: each photo is fitted, without distortion, into a fixed 1024 x 768 (or 768 x 1024) canvas, and up to three photos are in flight at once. RaCo upsamples its coarser feature levels with `align_corners`, which stretches the keypoints by 0.39 canvas pixels from edge to edge (measured on photos shifted by known amounts, the same on both sides of the canvas); the conversion back to the original image pulls them towards the canvas centre by that much. The network is split in three:
   - Core ML (GPU, fp32): RaCo's score map and ranker map, and ALIKED's four feature levels at their own resolutions (1, 1/2, 1/8, 1/32).
   - C++ (`select.cpp`, CPU): non-maximum suppression, top-k, sub-pixel refinement and the boundary ranker, giving 2048 keypoints in under a millisecond. It reproduces the exported ONNX select model for 1024 to 2560 keypoints, where RaCo ranks the boundary window: on the test photos, letterboxed too, the same keypoints inside the photo within 1e-4 px, in the same order except among exactly equal logits. The ONNX model remains available for comparison in builds with ONNX Runtime.
   - C++ (`descriptor_head.cpp`): ALIKED's sparse deformable descriptor head. It rebuilds the upsampled, L2-normalised feature vector only at the 9 patch pixels and 4 x 16 deformable sample corners of each keypoint, then runs the head's layers as matrix products. Building the full-resolution 128-channel map instead would cost 400 MB per photo.

@@ -304,8 +304,8 @@ public actor StitchEngine {
         var features: ImageFeatures {
             let inverse = SIMD2<Float>(1 / scale)
             let points = (0..<count).filter(isContent).map { index in
-                Keypoint(x: learnedToOriginal(keypoints[2 * index], inverse.x),
-                         y: learnedToOriginal(keypoints[2 * index + 1], inverse.y), size: 0,
+                Keypoint(x: learnedToOriginal(keypoints[2 * index], inverse.x, canvas: canvas.width),
+                         y: learnedToOriginal(keypoints[2 * index + 1], inverse.y, canvas: canvas.height), size: 0,
                          angle: 0, response: 0)
             }
             return ImageFeatures(imageID: image.id, source: .racoLightGlue, workingSize: content, keypoints: points,
@@ -459,10 +459,10 @@ public actor StitchEngine {
             let other = Int(partner[index])
             guard other >= 0, other < count, a.isContent(index), b.isContent(other) else { continue }
             matches.append(TentativeMatch(
-                a: Point2(x: learnedToOriginal(a.keypoints[2 * index], inverseA.x),
-                          y: learnedToOriginal(a.keypoints[2 * index + 1], inverseA.y)),
-                b: Point2(x: learnedToOriginal(b.keypoints[2 * other], inverseB.x),
-                          y: learnedToOriginal(b.keypoints[2 * other + 1], inverseB.y)),
+                a: Point2(x: learnedToOriginal(a.keypoints[2 * index], inverseA.x, canvas: a.canvas.width),
+                          y: learnedToOriginal(a.keypoints[2 * index + 1], inverseA.y, canvas: a.canvas.height)),
+                b: Point2(x: learnedToOriginal(b.keypoints[2 * other], inverseB.x, canvas: b.canvas.width),
+                          y: learnedToOriginal(b.keypoints[2 * other + 1], inverseB.y, canvas: b.canvas.height)),
                 score: confidence[index]
             ))
         }
@@ -571,8 +571,19 @@ public actor StitchEngine {
 /// on the downscaled image, so a point maps through the pixel centres.
 func siftToOriginal(_ value: Float, _ inverseScale: Float) -> Float { (value + 0.5) * inverseScale - 0.5 }
 
-/// RaCo-ALIKED keypoints are in edge coordinates (pixel i spans [i, i + 1)), as LightGlue expects.
-func learnedToOriginal(_ value: Float, _ inverseScale: Float) -> Float { value * inverseScale - 0.5 }
+/// The span RaCo's keypoints gain across the canvas, in canvas pixels. Its coarser feature levels (1/2, 1/8,
+/// 1/32) are upsampled with align_corners, which stretches each by s - 1 pixels from edge to edge about the
+/// canvas centre; the score map inherits a mix of them. Measured on synthetic photos shifted by known amounts:
+/// the same on both axes, on 1024 and on 768 pixels alike, between 0.37 and 0.47 with the scene and the aspect
+/// ratio; 0.42 is the middle, which leaves at most 0.05 / 1024 of the distance between two photos.
+let racoStretch: Float = 0.42
+
+/// RaCo-ALIKED keypoints are in edge coordinates of the canvas (pixel i spans [i, i + 1)): pulled back by
+/// `racoStretch` towards the centre of the canvas side `canvas`, then mapped to original pixel centres.
+func learnedToOriginal(_ value: Float, _ inverseScale: Float, canvas: Int) -> Float {
+    let side = Float(canvas), centre = side / 2
+    return (centre + (value - centre) * side / (side + racoStretch)) * inverseScale - 0.5
+}
 
 /// Reads a NUL-terminated message written by the C layer.
 func errorText(_ buffer: [CChar]) -> String {

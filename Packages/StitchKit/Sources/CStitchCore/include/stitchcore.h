@@ -297,6 +297,14 @@ int32_t sc_compositor_add_image(sc_compositor *compositor, int32_t index, const 
 int32_t sc_compositor_finish(sc_compositor *compositor, sc_panorama *panorama, char *error, size_t error_length);
 void sc_panorama_free(sc_panorama *panorama);
 
+// MARK: - Analysis images
+
+/// Reduces RGBA 8-bit pixels by area averaging (OpenCV INTER_AREA): each output pixel is the mean of the input
+/// it covers, so pixel centres map as (x + 0.5) * r - 0.5. `out` holds out_width x out_height pixels, rows
+/// packed; the output may not be larger than the input. Returns 1, or 0 on invalid input.
+int32_t sc_resize_area_rgba8(const uint8_t *pixels, int32_t width, int32_t height, int32_t bytes_per_row,
+                             uint8_t *out, int32_t out_width, int32_t out_height);
+
 // MARK: - Panorama helpers
 
 /// Largest axis-aligned rectangle of non-zero pixels in `mask` (one byte per pixel). Writes x, y,
