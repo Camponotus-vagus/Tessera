@@ -272,13 +272,12 @@ cv::Scalar as_scalar(const cv::Mat &single) {
     return cv::Scalar(g[0], g[1], g[2]);
 }
 
-// Finds the seams one pair of photos at a time, checking for cancellation in between. OpenCV's finders
-// work pair by pair too, in the same order: GraphCut takes the pairs as i < j, DP by decreasing distance
-// between the photos' centres (its private ImagePairLess, then reversed).
-// Seams pair by pair, in a fixed order, each pair moving the masks of its two photos. A pair waits only for the
-// earlier pairs of its photos: the pairs go in rounds, each pair one round after the last earlier pair that
-// shares a photo with it, and the pairs of a round, which share no photo, run at once with a finder each.
-// Every pair then finds its photos' masks as the order left them, so the seams are the same as one by one.
+// Seams pair by pair, in OpenCV's order (GraphCut takes the pairs as i < j, DP by decreasing distance between
+// the photos' centres: its private ImagePairLess, then reversed), each pair moving the masks of its two photos.
+// A pair waits only for the earlier pairs of its photos: the pairs go in rounds, each pair one round after the
+// last earlier pair that shares a photo with it, and the pairs of a round, which share no photo, run at once
+// with a finder each. Every pair then finds its photos' masks as the order left them, so the seams are the
+// same as one by one. Cancellation is checked between rounds.
 void find_seams(sc_compositor &c, const std::vector<cv::UMat> &images,
                 const std::function<cv::Ptr<cd::SeamFinder>()> &make_finder, const std::function<void(double)> &step) {
     std::vector<std::pair<size_t, size_t>> pairs;
