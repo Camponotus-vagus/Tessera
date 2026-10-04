@@ -144,7 +144,12 @@ private struct PanoramaFooter: View {
                         ForEach(pairs, id: \.self) { Text($0.text(session.name(of:))) }
                     } else {
                         DisclosureGroup(isExpanded: $showsPairs) {
-                            ForEach(pairs, id: \.self) { Text($0.text(session.name(of:))) }
+                            // The group centres its content otherwise.
+                            VStack(alignment: .leading, spacing: 3) {
+                                ForEach(pairs, id: \.self) { Text($0.text(session.name(of:))) }
+                            }
+                            .padding(.leading, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         } label: {
                             Text("\(pairs.count) pairs were left out of the alignment because they disagree with the others")
                         }
@@ -155,7 +160,11 @@ private struct PanoramaFooter: View {
                         }
                     } else {
                         DisclosureGroup(isExpanded: $showsPhotos) {
-                            ForEach(photos, id: \.self) { Text(describe($0)) }
+                            VStack(alignment: .leading, spacing: 3) {
+                                ForEach(photos, id: \.self) { Text(describe($0)) }
+                            }
+                            .padding(.leading, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         } label: {
                             Text("\(photos.count) photos are not in the panorama: \(reasons(photos))")
                         }
