@@ -14,6 +14,21 @@ Hundreds of near-identical labels in a box of pinned ants. LightGlue still finds
 
 ![Pair view on a box of pinned ants with repeated labels](docs/images/pair-view-repeated-labels.jpg)
 
+## Large sets
+
+Tessera handles sets of hundreds of photos. This mosaic is made from 491 of the 524 photos of OpenDroneMap's [zoo survey](https://github.com/OpenDroneMap/odm_data_zoo) (CC0 test data, 18 megapixels each), stitched at an eighth of full resolution: 511 photos connect, and the alignment leaves out 20 of them as misplaced, mostly treetops.
+
+![Mosaic of a zoo and its surroundings made from 491 drone photos](docs/images/zoo-mosaic.jpg)
+
+| Set | Photos joined | Result | Analysis + stitching on a MacBook Air M5 |
+|---|---|---|---|
+| Drone survey of a zoo, 18 MP photos | 511 of 524 | flat mosaic, 15.4 px alignment error | 6.6 + 5.1 min, at an eighth |
+| Drone survey of farm fields, 9.7 MP photos | 162 of 167 | flat mosaic, 7.6 px | 2.0 + 1.1 min, at a quarter |
+| NIST microscope tiles, 16-bit | 100 of 100 | 12713 x 9526 px (121 MP), 0.78 px | 18 + 9 s |
+| PTGui's Paris example, robotic head | 51 of 79 (the rest is plain sky) | 13548 x 7856 px after cropping, 1.35 px | 31 + 19 s |
+
+In the app, at a quarter of full resolution, the zoo mosaic comes out at 20501 x 15184 pixels (311 megapixels), stitched in just under six minutes after the analysis. To fit in the memory of a 32 GB Mac, Tessera made it at 93% of the requested size. The figures and what limits each set are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
 ## Download
 
 Tessera runs on Macs with Apple Silicon (M1 or later) and macOS 15 Sequoia or later.
