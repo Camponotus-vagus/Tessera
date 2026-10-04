@@ -113,7 +113,7 @@ struct InspectorView: View {
                     Text("Candidates").tag(PairSelection.proposed)
                     Text("All").tag(PairSelection.all)
                 }
-                Text("With more than 4 photos: consecutive shots, best neighbours by descriptor affinity, and pairs that join groups left apart.")
+                Text("With more than 4 photos: consecutive shots, best neighbours by descriptor affinity, and pairs that join groups left apart; with more than 8, also the pairs that overlap in a first layout of the photos.")
                     .font(.caption).foregroundStyle(.secondary)
                 Stepper(value: $session.configuration.proposalNeighbours, in: 1...6) {
                     LabeledContent("Neighbours per photo", value: "\(session.configuration.proposalNeighbours)")

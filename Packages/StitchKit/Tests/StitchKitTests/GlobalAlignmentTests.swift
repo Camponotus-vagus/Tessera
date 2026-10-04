@@ -79,7 +79,8 @@ struct GlobalAlignmentTests {
         var configuration = PipelineConfiguration()
         configuration.sources = [.rootSIFT]
         let report = try await StitchEngine().analyze(urls: urls, configuration: configuration)
-        let (problem, alignment, _) = try StitchEngine.alignment(for: report, straighten: true)
+        let outcome = try StitchEngine.alignment(for: report, straighten: true)
+        let problem = outcome.problem, alignment = outcome.alignment
         #expect(alignment.model == .homography, "chose \(alignment.model) at \(alignment.rms) px")
         #expect(alignment.rms < 1, "rms \(alignment.rms)")
         // Every pair placed as the truth places it, over the whole of photo a that lands in photo b.
@@ -132,7 +133,8 @@ struct GlobalAlignmentTests {
         var configuration = PipelineConfiguration()
         configuration.sources = [.rootSIFT]
         let report = try await StitchEngine().analyze(urls: urls, configuration: configuration)
-        let (problem, alignment, _) = try StitchEngine.alignment(for: report, straighten: false)
+        let outcome = try StitchEngine.alignment(for: report, straighten: false)
+        let problem = outcome.problem, alignment = outcome.alignment
         func intrinsics(_ i: Int) -> [Double] {
             [alignment.focals[i], 0, Double(width) / 2, 0, alignment.focals[i], Double(height) / 2, 0, 0, 1]
         }
@@ -286,16 +288,16 @@ struct GlobalAlignmentTests {
         // The case this test is about: the affine is outside the tolerance, and the homographies do not halve it.
         try #require(affine.rms > 1.25 * document.rms + 0.5 && document.rms > 0.5 * affine.rms,
                      "affine \(affine.rms), homographies \(document.rms)")
-        let (alignment, _, notes) = try Aligner.align(problem, mode: .auto, centre: 1, straighten: true)
+        let (alignment, _, notes, _, _) = try Aligner.align(problem, mode: .auto, centre: 1, straighten: true)
         #expect(alignment.model == .affine, "chose \(alignment.model)")
         #expect(notes.isEmpty, "\(notes)")
     }
 
     @Test("With no usable homography and no rotation, Automatic joins the photos with an affine fit and says it fits badly")
     func affineAsLastResort() throws {
-        // A camera turning by 100 degrees: the homographies fit, but stretch the outer photos more than four
-        // times. The EXIF focal lengths rule out the rotation: they disagree by 20%, and the matches point to
-        // a focal length less than half as long.
+        // A camera turning by 132 degrees: the homographies fit, but stretch the outer photos far beyond the
+        // eight times Automatic tolerates when they beat the planar fits by far. The EXIF focal lengths rule
+        // out the rotation: they disagree by 20%, and the matches point to a focal length less than half as long.
         var rng = SplitMix64(state: 5)
         let focal = 1400.0
         let toRay: [Double] = [1 / focal, 0, -600 / focal, 0, 1 / focal, -450 / focal, 0, 0, 1]
@@ -303,7 +305,7 @@ struct GlobalAlignmentTests {
             let r = degrees * .pi / 180
             return [cos(r), 0, sin(r), 0, 1, 0, -sin(r), 0, cos(r)]
         }
-        let yaws = [-50.0, -25, 0, 25, 50]
+        let yaws = [-66.0, -33, 0, 33, 66]
         let pairs = (0..<4).map { a in
             let h = multiply(AlignmentProblem.inverse(toRay), multiply(turn(-yaws[a + 1]), multiply(turn(yaws[a]), toRay)))
             return pair(a, a + 1, h, count: 150, noise: 0.3, rng: &rng)
@@ -312,8 +314,8 @@ struct GlobalAlignmentTests {
                                        thresholds: Array(repeating: 3, count: 5))
         #expect((try? Aligner.solve(.rotation, problem, anchor: 2)) == nil)
         let (document, stretch) = try Aligner.homographies(problem, anchor: 2)
-        #expect(document.rms < 1 && stretch.isFinite && stretch > Aligner.overstretch, "\(document.rms) px, stretch \(stretch)")
-        let (alignment, _, notes) = try Aligner.align(problem, mode: .auto, centre: 2, straighten: true)
+        #expect(document.rms < 1 && stretch > 2 * Aligner.overstretch, "\(document.rms) px, stretch \(stretch)")
+        let (alignment, _, notes, _, _) = try Aligner.align(problem, mode: .auto, centre: 2, straighten: true)
         #expect(alignment.model == .affine, "chose \(alignment.model)")
         #expect(notes.contains { $0.hasPrefix("No model fits these photos closely") }, "\(notes)")
     }
@@ -341,11 +343,12 @@ struct GlobalAlignmentTests {
         let first = try Aligner.align(AlignmentProblem(images: problem.images, pairs: problem.pairs, thresholds: [1e9, 1e9, 1e9, 1e9]),
                                       mode: .auto, centre: 0, straighten: true)
         try #require(first.0.model != .translation, "chose \(first.0.model) with the false link")
-        let (alignment, kept, notes) = try Aligner.align(problem, mode: .auto, centre: 0, straighten: true)
+        let (alignment, kept, notes, dropped, _) = try Aligner.align(problem, mode: .auto, centre: 0, straighten: true)
         #expect(kept.pairs.count == 4 && !kept.pairs.contains { $0.a == 0 && $0.b == 1 })
         #expect(alignment.model == .translation, "chose \(alignment.model) at \(alignment.rms) px")
         #expect(alignment.rms < 0.5)
-        #expect(notes.count == 1 && notes[0].hasPrefix("The pair photo0 ↔ photo1 was left out"), "\(notes)")
+        #expect(notes.isEmpty, "\(notes)")
+        #expect(dropped.count == 1 && dropped[0].a == 0 && dropped[0].b == 1, "\(dropped)")
     }
 
     @Test("Plane mode suggests Document mode only when homographies halve the planar error")
@@ -364,5 +367,149 @@ struct GlobalAlignmentTests {
         // A small perspective under heavy noise: they do better, not twice as well.
         let weak = try Aligner.align(chain(perspective: 1e-4, noise: 5.2), mode: .plane, centre: 1, straighten: true)
         #expect(!weak.notes.contains { $0.hasPrefix("The photos show perspective") }, "\(weak.notes)")
+    }
+
+    @Test("A pair whose loops do not close is left out, one that breaks a single loop is kept")
+    func loopConsistency() throws {
+        // A 3 x 3 grid of tiles 800 px apart, joined by their sides and by one diagonal per square.
+        var rng = SplitMix64(state: 13)
+        let origin = { (i: Int) in (Double(i % 3) * 800, Double(i / 3) * 600) }
+        func toB(_ a: Int, _ b: Int) -> [Double] {
+            [1, 0, origin(a).0 - origin(b).0, 0, 1, origin(a).1 - origin(b).1, 0, 0, 1]
+        }
+        var links = [(0, 1), (1, 2), (3, 4), (4, 5), (6, 7), (7, 8), (0, 3), (3, 6), (1, 4), (4, 7), (2, 5), (5, 8),
+                     (0, 4), (1, 5), (3, 7), (4, 8)]
+        links.sort { $0 < $1 }
+        // Pair 1-4 sits in four triangles and is 300 px off, like a match between two rows of identical labels;
+        // pair 6-7 sits in one triangle only and is off too.
+        let pairs = links.map { a, b -> AlignmentProblem.Pair in
+            var h = toB(a, b)
+            if (a, b) == (1, 4) || (a, b) == (6, 7) { h[2] += 300 }
+            return pair(a, b, h, count: 60, noise: 0.3, rng: &rng)
+        }
+        let problem = AlignmentProblem(images: photos(9), pairs: pairs, thresholds: Array(repeating: 3, count: 9))
+        let (kept, removed, leftOut) = problem.consistentLoops()
+        let names = removed.map { (problem.pairs[$0].a, problem.pairs[$0].b) }
+        #expect(names.count == 1 && names[0] == (1, 4), "\(names)")
+        #expect(leftOut.isEmpty)
+        #expect(kept.pairs.count == pairs.count - 1 && kept.images.count == 9)
+    }
+
+    @Test("A grid gets the pairs a provisional layout predicts, beyond the first candidates")
+    func layoutPredictedPairs() async throws {
+        let directory = try Synthetic.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // 4 x 3 tiles of 600 x 450 px, 480 px across and 360 px down: each overlaps up to eight others.
+        let scene = Synthetic.scene(width: 2100, height: 1200, seed: 61)
+        var urls: [URL] = []
+        for row in 0..<3 {
+            for column in 0..<4 {
+                let url = directory.appendingPathComponent(String(format: "tile_r%d_c%d.png", row, column))
+                try Synthetic.write(Synthetic.tile(of: scene, origin: CGPoint(x: column * 480, y: row * 360),
+                                                   size: CGSize(width: 600, height: 450)), to: url)
+                urls.append(url)
+            }
+        }
+        var configuration = PipelineConfiguration()
+        configuration.sources = [.rootSIFT]
+        configuration.proposalNeighbours = 1
+        let report = try await StitchEngine().analyze(urls: urls, configuration: configuration)
+        let predicted = (report.candidates ?? []).filter { $0.reasons.contains(.overlap) }
+        let verified = Set(report.pairs.filter { $0.verdict == .verified }.map { PairProposal.Key($0.a, $0.b) })
+        #expect(!predicted.isEmpty)
+        #expect(predicted.contains { verified.contains(PairProposal.Key($0.a, $0.b)) }, "\(predicted)")
+        #expect(report.graph.components.first?.count == 12)
+    }
+
+    /// A grid of tiles 800 px apart across and 600 px down from `origin`, each seen with its own tilt up to `tilt`.
+    private func tiles(columns: Int, rows: Int, origin: (x: Double, y: Double) = (0, 0), tilt: Double,
+                       rng: inout SplitMix64) -> [[Double]] {
+        (0..<(columns * rows)).map { i in
+            let x = origin.x + Double(i % columns) * 800, y = origin.y + Double(i / columns) * 600
+            let px = Double.random(in: -tilt...tilt, using: &rng), py = Double.random(in: -tilt...tilt, using: &rng)
+            return multiply([1, 0, x + 600, 0, 1, y + 450, 0, 0, 1], multiply([1, 0, 0, 0, 1, 0, px, py, 1], [1, 0, -600, 0, 1, -450, 0, 0, 1]))
+        }
+    }
+
+    /// The sides and one diagonal of every square of such a grid, whose first tile is `first`.
+    private func gridLinks(columns: Int, rows: Int, first: Int = 0) -> [(Int, Int)] {
+        var links: [(Int, Int)] = []
+        for i in 0..<(columns * rows) {
+            let c = i % columns, r = i / columns
+            if c + 1 < columns { links.append((first + i, first + i + 1)) }
+            if r + 1 < rows { links.append((first + i, first + i + columns)) }
+            if c + 1 < columns, r + 1 < rows { links.append((first + i, first + i + columns + 1)) }
+        }
+        return links
+    }
+
+    /// Pairs along `links` from the true maps of the photos onto the mosaic.
+    private func problem(_ truth: [[Double]], links: [(Int, Int)], rng: inout SplitMix64) -> AlignmentProblem {
+        let pairs = links.map { a, b in pair(a, b, multiply(AlignmentProblem.inverse(truth[b]), truth[a]), count: 60, noise: 0.3, rng: &rng) }
+        return AlignmentProblem(images: photos(truth.count), pairs: pairs, thresholds: Array(repeating: 3, count: truth.count))
+    }
+
+    @Test("Automatic keeps homographies that a misplaced photo stretched, and leaves the photo out")
+    func misplacedPhoto() throws {
+        // 8 x 5 tilted tiles. The last photo sees only a corner of its tile, shrunk to 0.15, as one taken from
+        // much closer would; its two pairs agree with each other and place it that way.
+        var rng = SplitMix64(state: 17)
+        var truth = tiles(columns: 8, rows: 5, tilt: 6e-5, rng: &rng)
+        let last = truth.count - 1
+        truth[last] = multiply(truth[last], [0.15, 0, 100, 0, 0.15, 100, 0, 0, 1])
+        let links = gridLinks(columns: 8, rows: 5).filter { $0 != (last - 9, last) }
+        let result = try Aligner.align(problem(truth, links: links, rng: &rng), mode: .auto, centre: 19, straighten: true)
+        #expect(result.alignment.model == .homography, "chose \(result.alignment.model) at \(result.alignment.rms) px")
+        #expect(result.misplaced == [last], "\(result.misplaced)")
+        #expect(result.alignment.rms < 1, "\(result.alignment.rms) px")
+    }
+
+    @Test("A stretched photo that alone joins two parts of the set stays, and so do both parts")
+    func stretchedBridge() throws {
+        // Two 5 x 4 grids of tilted tiles 600 px apart, joined only by a photo taken from much higher that
+        // spans both: the homographies stretch it 4.5 times, and leaving it out would take one grid with it.
+        var rng = SplitMix64(state: 23)
+        let truth = tiles(columns: 5, rows: 4, tilt: 6e-5, rng: &rng)
+            + tiles(columns: 5, rows: 4, origin: (5000, 0), tilt: 6e-5, rng: &rng)
+            + [[4.5, 0, 2000, 0, 4.5, 0, 0, 0, 1]]
+        let bridge = truth.count - 1
+        let links = gridLinks(columns: 5, rows: 4) + gridLinks(columns: 5, rows: 4, first: 20) + [(4, bridge), (bridge, 20)]
+        let result = try Aligner.align(problem(truth, links: links, rng: &rng), mode: .auto, centre: 7, straighten: true)
+        #expect(result.misplaced.isEmpty, "\(result.misplaced)")
+        #expect(result.problem.images.count == truth.count)
+    }
+
+    @Test("A photo the homographies stretch stays when a planar model places it as well as the rest")
+    func stretchedButPlaced() throws {
+        // 8 x 5 flat tiles and a photo of a corner of the last one at a fifth of the scale: the similarity
+        // places it to within the noise, while the homographies stretch it five times.
+        var rng = SplitMix64(state: 29)
+        var truth = tiles(columns: 8, rows: 5, tilt: 0, rng: &rng)
+        let close = truth.count
+        truth.append(multiply(truth[close - 1], [0.2, 0, 100, 0, 0.2, 100, 0, 0, 1]))
+        let links = gridLinks(columns: 8, rows: 5) + [(close - 1, close), (close - 2, close)]
+        let result = try Aligner.align(problem(truth, links: links, rng: &rng), mode: .auto, centre: 19, straighten: true)
+        #expect(result.alignment.model == .similarity, "chose \(result.alignment.model) at \(result.alignment.rms) px")
+        #expect(result.misplaced.isEmpty, "\(result.misplaced)")
+        #expect(result.problem.images.count == truth.count)
+    }
+
+    @Test("Matches along a single row leave the affine fit unsheared, with the shift in the translation")
+    func collinearMatches() throws {
+        // 60 matches on one row, the second photo 1000 px to the right: the shear and the vertical scale are
+        // free, and the fit keeps them at the identity.
+        // On the centre row (y = 450) the shear is not even in the equations.
+        for row: Float in [650, 450] {
+            var points: [Float] = []
+            for k in 0..<60 {
+                let x = Float(100 + 15 * k)
+                points += [x, row, x - 1000, row]
+            }
+            let pair = AlignmentProblem.Pair(a: 0, b: 1, points: points, sigmas: Array(repeating: 1, count: 60),
+                                             homography: [1, 0, -1000, 0, 1, 0, 0, 0, 1], siftPoints: [], siftSigmas: [])
+            let fit = try Aligner.solve(.affine, AlignmentProblem(images: photos(2), pairs: [pair], thresholds: [3, 3]), anchor: 0)
+            let m = fit.transforms[1]
+            #expect(abs(m[1]) < 1e-3 && abs(m[4] - 1) < 1e-3 && abs(m[2] - 1000) < 0.1 && abs(m[5]) < 0.1, "row \(row): \(m)")
+        }
     }
 }

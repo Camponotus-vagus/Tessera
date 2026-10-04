@@ -273,8 +273,9 @@ extension StitchEngine {
         let start = ContinuousClock.now
         var timings = PanoramaTimings()
         progress?(ProgressEvent(stage: "align", completed: 0, total: 0))
-        let (problem, alignment, alignmentNotes) = try Self.alignment(for: report, straighten: request.straighten)
-        var notes = alignmentNotes
+        let outcome = try Self.alignment(for: report, straighten: request.straighten)
+        let problem = outcome.problem, alignment = outcome.alignment
+        var notes = outcome.notes
         let images = problem.images
         try Task.checkCancellation()
 
@@ -371,14 +372,16 @@ extension StitchEngine {
 
         let ids = Set(images.map(\.id))
         var leftOut: [Int: ExclusionReason] = [:]
+        let inconsistent = Set(outcome.leftOutImages), misplaced = Set(outcome.misplacedImages)
         for node in report.graph.nodes where !ids.contains(node.id) {
-            leftOut[node.id] = node.exclusion ?? .separateGroup
+            leftOut[node.id] = inconsistent.contains(node.id) ? .inconsistentPairs
+                : misplaced.contains(node.id) ? .misplaced : node.exclusion ?? .separateGroup
         }
         return Panorama(
             request: request, model: alignment.model, projection: projection, pixels: pixels, crop: crop,
             preview: preview,
             outlines: Dictionary(uniqueKeysWithValues: images.indices.map { (images[$0].id, compositor.outline($0)) }),
-            imageIDs: images.map(\.id), leftOut: leftOut, reportCreatedAt: report.createdAt,
+            imageIDs: images.map(\.id), leftOut: leftOut, leftOutPairs: outcome.leftOutPairs, reportCreatedAt: report.createdAt,
             alignmentError: alignment.rms, notes: notes, timings: timings
         )
     }

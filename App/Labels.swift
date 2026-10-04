@@ -71,6 +71,8 @@ extension ExclusionReason {
         case .noVerifiedPair: String(localized: "no verified pair")
         case .weakLinkOnly: String(localized: "weak links only")
         case .separateGroup: String(localized: "separate group")
+        case .inconsistentPairs: String(localized: "only pairs that disagree with the others")
+        case .misplaced: String(localized: "placed implausibly by its pairs")
         case .excludedByUser: String(localized: "excluded")
         }
     }
@@ -122,6 +124,7 @@ extension ProgressEvent {
         case "lightglue-match": String(localized: "LightGlue matching")
         case "verify": String(localized: "Geometric verification")
         case "bridge": String(localized: "Pairs between separate groups")
+        case "overlap": String(localized: "Pairs the layout predicts")
         case "align": String(localized: "Aligning the photos")
         case "seams": String(localized: "Finding seams")
         case "exposure": String(localized: "Seams and exposure")

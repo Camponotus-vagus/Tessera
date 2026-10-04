@@ -164,14 +164,25 @@ public:
 
     double &rhs(int k) { return rhs_[k]; }
 
-    // Solves (A + damping * diag(A)) x = rhs; false when the matrix is not positive definite.
-    bool solve(std::vector<double> &x, double damping) const {
+    // Solves (A + damping * D) x = rhs + damping * D * towards, with D the diagonal of A on the first `damped`
+    // unknowns of each block (all of them when negative, at least 1e-6 of the block's largest) and zero elsewhere, so that damping pulls those
+    // unknowns towards `towards` (zero when it is null); false when the matrix is not positive definite.
+    bool solve(std::vector<double> &x, double damping, const std::vector<double> *towards = nullptr,
+               int damped = -1) const {
         if (symbolic_.status != SparseStatusOK) return false;
         std::vector<double> values = values_;
+        x = rhs_;
         if (damping != 0) {
             for (int j = 0; j < blocks_; ++j) {
                 double *diagonal = values.data() + static_cast<size_t>(index_.at(key(j, j))) * d_ * d_;
-                for (int k = 0; k < d_; ++k) diagonal[k * d_ + k] *= 1 + damping;
+                // An unknown no match constrains (every point of a photo on its centre row) gets a floor.
+                double largest = 0;
+                for (int k = 0; k < d_; ++k) largest = std::max(largest, diagonal[k * d_ + k]);
+                for (int k = 0; k < (damped < 0 ? d_ : std::min(damped, d_)); ++k) {
+                    const double extra = damping * std::max(diagonal[k * d_ + k], 1e-6 * largest);
+                    if (towards) x[j * d_ + k] += extra * (*towards)[j * d_ + k];
+                    diagonal[k * d_ + k] += extra;
+                }
             }
         }
         SparseMatrix_Double matrix{structure(), values.data()};
@@ -180,7 +191,6 @@ public:
             SparseCleanup(factor);
             return false;
         }
-        x = rhs_;
         DenseVector_Double vector{static_cast<int>(x.size()), x.data()};
         SparseSolve(factor, vector);
         SparseCleanup(factor);
@@ -317,14 +327,7 @@ bool solve_linear(sc_align_model model, const std::vector<cv::Size> &sizes, cons
     auto block = [&](int image) { return slot[image] < 0 ? -1 : slot[image] / d; };
     for (const Pair &pair : pairs) links.emplace_back(block(pair.a), block(pair.b));
     BlockNormalEquations system(unknowns, d, links);
-    // Each photo's linear scale on the mosaic, sqrt |det L|, from the previous pass.
-    std::vector<double> photo_scale(n, 1.0);
     for (iterations = 0; iterations < 8; ++iterations) {
-        for (int i = 0; i < n; ++i) {
-            if (slot[i] < 0) continue;
-            const cv::Matx33d M = linear_transform(model, theta.data() + slot[i], centre[i]);
-            photo_scale[i] = std::max(1e-3, std::sqrt(std::fabs(M(0, 0) * M(1, 1) - M(0, 1) * M(1, 0))));
-        }
         system.clear();
         for (const Pair &pair : pairs) {
             PairBlocks blocks(system, block(pair.a), block(pair.b));
@@ -332,12 +335,9 @@ bool solve_linear(sc_align_model model, const std::vector<cv::Size> &sizes, cons
                 cv::Vec2d ma, mb;
                 evaluate(pair.a, c.a, ma);
                 evaluate(pair.b, c.b, mb);
-                // First pass: plain least squares; then Huber weights on the current residual, measured in
-                // the photos' own pixels. In the mosaic's pixels a group of photos held by wrong pairs could
-                // lower its error by shrinking: 191 of 524 drone photos collapsed into a thin strip.
-                const double scale = iterations == 0 ? 1 : 0.5 * (photo_scale[pair.a] + photo_scale[pair.b]);
-                const double scaled = iterations == 0 ? 0 : cv::norm(ma - mb) / (scale * c.sigma);
-                const double w = huber(scaled) / (scale * scale * c.sigma * c.sigma);
+                // First pass: plain least squares; then Huber weights on the current residual.
+                const double scaled = iterations == 0 ? 0 : cv::norm(ma - mb) / c.sigma;
+                const double w = huber(scaled) / (c.sigma * c.sigma);
                 double Ja[2][6], Jb[2][6];
                 cv::Vec2d ka, kb;
                 linear_rows(model, c.a - centre[pair.a], Ja, ka);
@@ -356,10 +356,13 @@ bool solve_linear(sc_align_model model, const std::vector<cv::Size> &sizes, cons
                 }
             }
         }
-        // A degenerate pair (collinear points for an affine fit) leaves the matrix singular: a tiny ridge
-        // then picks the solution closest to the current one in the free directions.
+        // A degenerate pair (collinear points for an affine fit, a single point for a similarity) leaves the
+        // matrix singular, and roundoff can still let the factorisation through, with any value in the free
+        // directions. A tiny ridge on the linear part (all but the last two unknowns of a photo) keeps it at
+        // its current value there, with the translation taking up the rest, and moves the other unknowns by
+        // a part in a billion.
         std::vector<double> x;
-        if (!system.solve(x, 0) && !system.solve(x, 1e-9)) return false;
+        if (!system.solve(x, 1e-9, &theta, d - 2)) return false;
         double change = 0;
         for (int i = 0; i < P; ++i) {
             change = std::max(change, std::fabs(x[i] - theta[i]));
@@ -405,13 +408,28 @@ bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pa
     const cv::Matx33d Nm = N[anchor], Nm_inv = Nm.inv();
     const double mosaic_scale = 1.0 / Nm(0, 0);  // pixels of the anchor per normalised unit
 
-    // Initialise by chaining the pair homographies along a maximum spanning tree.
+    // Initialise by chaining the pairs along a maximum spanning tree, each pair by the affine map that
+    // matches its homography where its correspondences are. Chaining the homographies themselves piled up
+    // their perspective branch by branch, and at the end of a long branch of drone photos it reached the
+    // horizon (scales of 9 to 60); the optimisation then adds the perspective the photos call for.
+    auto local_affine = [](const Pair &pair) {
+        cv::Vec2d c(0, 0);
+        for (const Correspondence &k : pair.points) c += k.a;
+        c *= 1.0 / std::max<size_t>(1, pair.points.size());
+        const cv::Matx33d &H = pair.homography;
+        const cv::Vec3d q = H * cv::Vec3d(c[0], c[1], 1);
+        const double w = q[2], x = q[0] / w, y = q[1] / w;
+        const double j00 = (H(0, 0) - x * H(2, 0)) / w, j01 = (H(0, 1) - x * H(2, 1)) / w;
+        const double j10 = (H(1, 0) - y * H(2, 0)) / w, j11 = (H(1, 1) - y * H(2, 1)) / w;
+        return cv::Matx33d(j00, j01, x - j00 * c[0] - j01 * c[1], j10, j11, y - j10 * c[0] - j11 * c[1], 0, 0, 1);
+    };
     std::vector<cv::Matx33d> init(n, cv::Matx33d::eye());
     std::vector<bool> placed(n, false);
     placed[anchor] = true;
     for (const auto &[p, image] : spanning_order(n, pairs, anchor)) {
         const Pair &pair = pairs[p];
-        init[image] = image == pair.b ? init[pair.a] * pair.homography.inv() : init[pair.b] * pair.homography;
+        const cv::Matx33d A = local_affine(pair);
+        init[image] = image == pair.b ? init[pair.a] * A.inv() : init[pair.b] * A;
         placed[image] = true;
     }
     if (!std::all_of(placed.begin(), placed.end(), [](bool v) { return v; })) return false;

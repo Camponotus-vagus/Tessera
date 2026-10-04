@@ -187,6 +187,10 @@ public enum ExclusionReason: String, Sendable, Codable {
     case noVerifiedPair
     case weakLinkOnly
     case separateGroup
+    /// Joined to the main group only through pairs whose loops do not close.
+    case inconsistentPairs
+    /// Its pairs place it implausibly: the homographies stretch it more than four times.
+    case misplaced
     case excludedByUser
 }
 
@@ -275,6 +279,8 @@ public enum CandidateReason: String, Sendable, Codable {
     case spanningTree
     /// Tried after verification to join groups the first candidates left apart.
     case bridge
+    /// Predicted to overlap by a provisional alignment of the main group.
+    case overlap
 }
 
 /// A pair the matchers examined, and why it was chosen.

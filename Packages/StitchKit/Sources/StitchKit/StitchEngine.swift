@@ -1,5 +1,6 @@
 import CStitchCore
 import Foundation
+import simd
 
 public struct ProgressEvent: Sendable {
     public var stage: String
@@ -110,8 +111,8 @@ public actor StitchEngine {
         )
 
         // 5. If the verified pairs leave separate groups, try the best untried pairs between them.
+        var tried = Set(candidates.map { PairProposal.Key($0.a, $0.b) })
         if configuration.pairSelection == .proposed {
-            var tried = Set(candidates.map { PairProposal.Key($0.a, $0.b) })
             for _ in 0..<3 {
                 let joined = verified.filter { $0.verdict == .verified }.map { PairProposal.Key($0.a, $0.b) }
                 let groups = PairProposal.components(active.map(\.id), edges: joined)
@@ -126,9 +127,33 @@ public actor StitchEngine {
             }
         }
 
+        let features = active.compactMap { sift[$0.id]?.1 } + active.compactMap { learned[$0.id]?.features }
+
+        // 6. Pairs the layout predicts. The candidates join a large set almost as a tree, where a false pair
+        //    has nothing to disagree with: 728 pairs for 511 drone photos that each overlap six or eight
+        //    others. A provisional alignment of the main group places the photos, and pairs that overlap
+        //    there but were never compared are matched too; the loops they close let the global alignment
+        //    find the false pairs.
+        if configuration.pairSelection == .proposed, active.count > Self.overlapRounds.minimumPhotos {
+            for _ in 0..<Self.overlapRounds.count {
+                try Task.checkCancellation()
+                let graph = MatchGraphBuilder.build(images: images, features: features, pairs: verified, excluded: excluded,
+                                                    unreadable: unreadable, configuration: configuration)
+                let provisional = MatchReport(
+                    createdAt: Date(), configuration: configuration, images: images, features: [], pairs: verified,
+                    graph: graph, excludedByUser: excluded.sorted(), candidates: nil, learnedPipeline: nil, learnedProblem: nil)
+                progress?(ProgressEvent(stage: "overlap", completed: 0, total: 0))
+                let predicted = try Self.overlapping(provisional, tried: tried, perPhoto: Self.overlapRounds.perPhoto)
+                guard !predicted.isEmpty else { break }
+                progress?(ProgressEvent(stage: "overlap", completed: 0, total: predicted.count))
+                candidates += predicted
+                tried.formUnion(predicted.map { PairProposal.Key($0.a, $0.b) })
+                verified += try await examine(predicted)
+            }
+        }
+
         // Pairs arrive in completion order; a fixed order makes identical runs give identical reports.
         verified.sort { ($0.a, $0.b, $0.source.rawValue) < ($1.a, $1.b, $1.source.rawValue) }
-        let features = active.compactMap { sift[$0.id]?.1 } + active.compactMap { learned[$0.id]?.features }
         let graph = MatchGraphBuilder.build(
             images: images, features: features, pairs: verified, excluded: excluded, unreadable: unreadable,
             configuration: configuration
@@ -138,6 +163,84 @@ public actor StitchEngine {
             pairs: verified, graph: graph, excludedByUser: excluded.sorted(), candidates: candidates,
             learnedPipeline: session?.pipeline, learnedProblem: learnedProblem
         )
+    }
+
+    /// Layout-predicted pairs: above `minimumPhotos` photos, `count` rounds of at most `perPhoto` new pairs.
+    static let overlapRounds = (minimumPhotos: 8, count: 2, perPhoto: 6)
+
+    /// Untried pairs of the main group that a provisional alignment of `report` places on top of each other,
+    /// most overlapping first: for each photo its `perPhoto` best, at most four per photo in all.
+    /// Throws only when cancelled.
+    nonisolated static func overlapping(_ report: MatchReport, tried: Set<PairProposal.Key>, perPhoto: Int) throws
+        -> [CandidatePair] {
+        var outcome: AlignmentOutcome
+        do {
+            outcome = try alignment(for: report, straighten: false, provisional: true)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return []
+        }
+        // The layout only has to be right locally: when homographies fit the pairs better than the model
+        // the mode picks (whose stretch rule guards the whole panorama), they predict the overlaps.
+        if outcome.alignment.model != .rotation, outcome.alignment.model != .homography {
+            var flat = report
+            flat.configuration.mode = .document
+            func median(_ values: [Double]) -> Double { values.sorted().dropFirst(values.count / 2).first ?? .infinity }
+            let document = try? alignment(for: flat, straighten: false, provisional: true)
+            try Task.checkCancellation()
+            if let document, median(document.alignment.pairRMS) < median(outcome.alignment.pairRMS) {
+                outcome = document
+            }
+        }
+        let images = outcome.problem.images, alignment = outcome.alignment
+        var scores: [(key: PairProposal.Key, overlap: Double)] = []
+        if alignment.model == .rotation {
+            // Optical axes (world ray of the photo centre) and half fields of view along the short side.
+            let axes = alignment.transforms.map { r in simd_normalize(SIMD3(r[2], r[5], r[8])) }
+            let halves = images.indices.map { i in
+                atan(Double(min(images[i].pixelSize.width, images[i].pixelSize.height)) / (2 * alignment.focals[i]))
+            }
+            for i in images.indices {
+                for j in images.indices where j > i {
+                    let angle = acos(max(-1, min(1, simd_dot(axes[i], axes[j]))))
+                    let reach = halves[i] + halves[j]
+                    if angle < reach { scores.append((PairProposal.Key(images[i].id, images[j].id), 1 - angle / reach)) }
+                }
+            }
+        } else {
+            // Each photo's outline on the mosaic, a convex quadrilateral while it stays in front of the plane.
+            let outlines: [[SIMD2<Double>]?] = images.indices.map { i in
+                let m = PlaneGeometry.matrix(alignment.transforms[i])
+                let w = Double(images[i].pixelSize.width), h = Double(images[i].pixelSize.height)
+                let corners = [(0.0, 0.0), (w, 0), (w, h), (0, h)].compactMap { PlaneGeometry.apply(m, $0.0, $0.1) }
+                return corners.count == 4 ? corners : nil
+            }
+            let areas = outlines.map { $0.map { abs(PlaneGeometry.signedArea($0)) } ?? 0 }
+            let boxes = outlines.map { outline -> (SIMD2<Double>, SIMD2<Double>)? in
+                outline.map { points in (points.reduce(points[0]) { simd_min($0, $1) }, points.reduce(points[0]) { simd_max($0, $1) }) }
+            }
+            for i in images.indices {
+                guard let a = outlines[i], let boxA = boxes[i], areas[i] > 0 else { continue }
+                for j in images.indices where j > i {
+                    guard let b = outlines[j], let boxB = boxes[j], areas[j] > 0,
+                          boxA.0.x < boxB.1.x, boxB.0.x < boxA.1.x, boxA.0.y < boxB.1.y, boxB.0.y < boxA.1.y
+                    else { continue }
+                    let shared = abs(PlaneGeometry.signedArea(PlaneGeometry.clip(a, by: b)))
+                    let overlap = shared / min(areas[i], areas[j])
+                    if overlap > 0.05 { scores.append((PairProposal.Key(images[i].id, images[j].id), overlap)) }
+                }
+            }
+        }
+        let untried = scores.filter { !tried.contains($0.key) }.sorted { ($0.overlap, $1.key) > ($1.overlap, $0.key) }
+        var chosen: [PairProposal.Key] = [], taken = Set<PairProposal.Key>(), count: [Int: Int] = [:]
+        for score in untried where count[score.key.a, default: 0] < perPhoto || count[score.key.b, default: 0] < perPhoto {
+            guard chosen.count < 4 * images.count, taken.insert(score.key).inserted else { continue }
+            chosen.append(score.key)
+            count[score.key.a, default: 0] += 1
+            count[score.key.b, default: 0] += 1
+        }
+        return chosen.map { CandidatePair(a: $0.a, b: $0.b, affinity: nil, reasons: [.overlap]) }
     }
 
     /// The learned session when RaCo + LightGlue is among the sources. When it cannot be loaded (no

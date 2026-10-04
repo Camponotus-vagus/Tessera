@@ -98,6 +98,16 @@ enum PlaneGeometry {
         return clip(polygon, by: [{ $0.x }, { w - $0.x }, { $0.y }, { h - $0.y }])
     }
 
+    /// The part of convex `polygon` inside convex `other`, whichever way either is wound.
+    static func clip(_ polygon: [SIMD2<Double>], by other: [SIMD2<Double>]) -> [SIMD2<Double>] {
+        let orientation = signedArea(other) >= 0 ? 1.0 : -1.0
+        let halfPlanes = other.indices.map { index -> (SIMD2<Double>) -> Double in
+            let p = other[index], q = other[(index + 1) % other.count]
+            return { point in orientation * ((q.x - p.x) * (point.y - p.y) - (q.y - p.y) * (point.x - p.x)) }
+        }
+        return clip(polygon, by: halfPlanes)
+    }
+
     /// Sutherland-Hodgman clipping by half-planes, each given as a function that is >= 0 inside.
     /// The functions must be affine in the point, so edge intersections can be interpolated.
     static func clip(_ polygon: [SIMD2<Double>], by halfPlanes: [(SIMD2<Double>) -> Double]) -> [SIMD2<Double>] {

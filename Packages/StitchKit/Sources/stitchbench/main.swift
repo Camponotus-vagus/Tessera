@@ -15,6 +15,9 @@ struct Options {
     var request = StitchRequest()
     var crop: Bool?
     var output: URL?
+    var saveReport: URL?
+    var loadReport: URL?
+    var modeGiven = false
     var repeats = 1
     var files: [URL] = []
 }
@@ -27,7 +30,9 @@ func usage(_ problem: String? = nil) -> Never {
                        [--matcher onnx|gpu|ane|all] [--precision fp16|fp32] [--sift-mp 1.5] [--all-pairs]
                        [--low-memory] [--onnx-select] [--align] [--repeat N]
                        [--stitch file.jpg|png|tif|heic] [--projection automatic|flat|rectilinear|cylindrical|spherical]
-                       [--scale 0.5] [--original-pixels] [--exposure channels|blocks|none] [--crop|--no-crop] [--out dir] images...
+                       [--scale 0.5] [--original-pixels] [--exposure channels|blocks|none] [--crop|--no-crop] [--out dir]
+                       [--save-report file.json] images...
+           stitchbench --load-report file.json [--mode ...] [--align] [--stitch file] ...
            stitchbench --download-models [images...]
     """)
     exit(2)
@@ -70,6 +75,7 @@ func parse() -> Options {
             let text = value(argument)
             guard let mode = StitchMode(rawValue: text) else { usage("unknown mode \(text)") }
             options.configuration.mode = mode
+            options.modeGiven = true
         case "--source":
             switch value(argument) {
             case "sift": options.configuration.sources = [.rootSIFT]
@@ -106,13 +112,15 @@ func parse() -> Options {
         case "--crop": options.crop = true
         case "--no-crop": options.crop = false
         case "--out": options.output = URL(fileURLWithPath: value(argument), isDirectory: true)
+        case "--save-report": options.saveReport = URL(fileURLWithPath: value(argument))
+        case "--load-report": options.loadReport = URL(fileURLWithPath: value(argument))
         case "-h", "--help": usage()
         case let option where option.hasPrefix("--"): usage("unknown option \(option)")
         default: options.files.append(URL(fileURLWithPath: argument))
         }
     }
     // --download-models alone only installs the models.
-    if options.files.count < 2, !(options.downloadModels && options.files.isEmpty) {
+    if options.files.count < 2, !(options.downloadModels && options.files.isEmpty), options.loadReport == nil {
         usage("at least two images are needed")
     }
     return options
@@ -184,7 +192,13 @@ func run() async throws {
     resolveModels(&options)
     let engine = StitchEngine()
     var report: MatchReport?
-    for run in 1...options.repeats {
+    if let file = options.loadReport {
+        // An earlier analysis: only the alignment and the stitch run again, in the mode given here.
+        var loaded = try MatchReport.decode(Data(contentsOf: file))
+        if options.modeGiven { loaded.configuration.mode = options.configuration.mode }
+        report = loaded
+    }
+    for run in 1...options.repeats where options.loadReport == nil {
         let start = ContinuousClock.now
         report = try await engine.analyze(urls: options.files, configuration: options.configuration)
         let elapsed = ContinuousClock.now - start
@@ -192,6 +206,7 @@ func run() async throws {
               "peak RSS \(format(peakResidentMegabytes(), 0)) MB")
     }
     guard let report else { exit(1) }
+    if let file = options.saveReport { try report.jsonData().write(to: file) }
     if let pipeline = report.learnedPipeline { print("learned: \(pipeline)") }
     if let problem = report.learnedProblem { warn("RaCo + LightGlue did not run, RootSIFT only: \(problem)") }
 
@@ -265,6 +280,11 @@ func run() async throws {
             "blend \(format(t.blending))s, total \(format(t.total))s"
         print("  times: \(stages), write \(written), peak RSS \(format(peakResidentMegabytes(), 0)) MB")
         for note in panorama.notes { print("  note: \(note)") }
+        let names = Dictionary(uniqueKeysWithValues: report.images.map { ($0.id, $0.name) })
+        for pair in panorama.leftOutPairs { print("  left out: \(pair.text { names[$0] ?? "\($0)" })") }
+        for (id, reason) in panorama.leftOut.sorted(by: { $0.key < $1.key }) where reason == .inconsistentPairs || reason == .misplaced {
+            print("  left out: \(names[id] ?? "\(id)") (\(reason.rawValue))")
+        }
         let total = (ContinuousClock.now - start).formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow))
         print("  wrote \(file.path) (\(total))")
     }

@@ -129,28 +129,61 @@ private struct StitchingCard: View {
 private struct PanoramaFooter: View {
     @Environment(DiagnosticSession.self) private var session
     let panorama: Panorama
+    @State private var showsPairs = false
+    @State private var showsPhotos = false
 
     var body: some View {
-        let lines = panorama.notes + leftOut
-        if !lines.isEmpty {
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach(lines, id: \.self) { Text($0) }
+        let pairs = panorama.leftOutPairs
+        let photos = panorama.leftOut.keys.sorted()
+        if !panorama.notes.isEmpty || !pairs.isEmpty || !photos.isEmpty {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(panorama.notes, id: \.self) { Text($0) }
+                    // A few items are listed; many are summed up, with the list one click away.
+                    if pairs.count <= 3 {
+                        ForEach(pairs, id: \.self) { Text($0.text(session.name(of:))) }
+                    } else {
+                        DisclosureGroup(isExpanded: $showsPairs) {
+                            ForEach(pairs, id: \.self) { Text($0.text(session.name(of:))) }
+                        } label: {
+                            Text("\(pairs.count) pairs were left out of the alignment because they disagree with the others")
+                        }
+                    }
+                    if photos.count <= 6 {
+                        if !photos.isEmpty {
+                            Text("Not in the panorama: \(photos.map(describe).joined(separator: ", "))")
+                        }
+                    } else {
+                        DisclosureGroup(isExpanded: $showsPhotos) {
+                            ForEach(photos, id: \.self) { Text(describe($0)) }
+                        } label: {
+                            Text("\(photos.count) photos are not in the panorama: \(reasons(photos))")
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
             }
+            .frame(maxHeight: 160)
+            .fixedSize(horizontal: false, vertical: true)
             .font(.caption)
             .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
             .background(.bar)
         }
     }
 
-    private var leftOut: [String] {
-        guard !panorama.leftOut.isEmpty else { return [] }
-        let names = panorama.leftOut.keys.sorted().map { id in
-            "\(session.name(of: id)) (\(panorama.leftOut[id]!.label))"
-        }
-        return [String(localized: "Not in the panorama: \(names.joined(separator: ", "))")]
+    private func describe(_ id: Int) -> String {
+        "\(session.name(of: id)) (\(panorama.leftOut[id]?.label ?? ""))"
+    }
+
+    /// "no verified pair (20), separate group (15)", most frequent first.
+    private func reasons(_ photos: [Int]) -> String {
+        var counts: [ExclusionReason: Int] = [:]
+        for id in photos { if let reason = panorama.leftOut[id] { counts[reason, default: 0] += 1 } }
+        return counts.sorted { ($0.value, $1.key.rawValue) > ($1.value, $0.key.rawValue) }
+            .map { "\($0.key.label) (\($0.value))" }
+            .joined(separator: ", ")
     }
 }
 

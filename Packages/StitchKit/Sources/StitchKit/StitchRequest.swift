@@ -126,6 +126,8 @@ public struct Panorama: Sendable, Identifiable {
     public var imageIDs: [Int]
     /// Photos of the report that are not in it, with the reason.
     public var leftOut: [Int: ExclusionReason]
+    /// Verified pairs of its photos that the alignment did not use.
+    public var leftOutPairs: [LeftOutPair]
     /// `MatchReport.createdAt` of the analysis it was built from.
     public var reportCreatedAt: Date
     /// RMS transfer error of the correspondences after global alignment, full-resolution pixels.
