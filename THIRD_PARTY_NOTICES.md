@@ -6,7 +6,7 @@ Tessera uses the following software and models. Their licenses apply to the corr
 |---|---|---|
 | [OpenCV](https://opencv.org) 5.0.0 | SIFT, robust model fitting (USAC / MAGSAC++), bundle adjustment, warping, exposure compensation, seam finding and multi-band blending; linked statically into the app | Apache-2.0 |
 | Carotene, OpenCV's ARM NEON HAL (NVIDIA) | optimised image routines inside OpenCV | BSD-3-Clause |
-| OpenCV's bundle adjusters (Intel, Willow Garage) | a modified copy of their optimisation loop in `interruptible_adjuster.hpp`, so that the alignment reports its progress and stops when asked | BSD-3-Clause |
+| OpenCV's bundle adjusters (Intel, Willow Garage) | a modified copy of their optimisation loop and Jacobians in `interruptible_adjuster.hpp`, so that the alignment reports its progress and stops when asked | BSD-3-Clause |
 | [ONNX Runtime](https://onnxruntime.ai) | optional, only in builds with the `ONNXRuntime` trait: ONNX keypoint selection and CPU backends for the learned models; not in the released app | MIT |
 | [RaCo](https://github.com/cvg/RaCo) (ETH Zurich, Computer Vision and Geometry group) | keypoint detector and ranker weights | Apache-2.0 |
 | [ALIKED](https://github.com/Shiaoming/ALIKED) | descriptor network weights | BSD-3-Clause |

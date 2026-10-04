@@ -22,7 +22,7 @@ Tessera handles sets of hundreds of photos. This mosaic is made from 491 of the 
 
 | Set | Photos joined | Result | Analysis + stitching on a MacBook Air M5 |
 |---|---|---|---|
-| Drone survey of a zoo, 18 MP photos | 511 of 524 | flat mosaic, 15.4 px alignment error | 6.6 + 5.1 min, at an eighth |
+| Drone survey of a zoo, 18 MP photos | 491 of 524 (511 connect) | flat mosaic, 15.4 px alignment error | 6.6 + 5.1 min, at an eighth |
 | Drone survey of farm fields, 9.7 MP photos | 162 of 167 | flat mosaic, 7.6 px | 2.0 + 1.1 min, at a quarter |
 | NIST microscope tiles, 16-bit | 100 of 100 | 12713 x 9526 px (121 MP), 0.78 px | 18 + 9 s |
 | PTGui's Paris example, robotic head | 51 of 79 (the rest is plain sky) | 13548 x 7856 px after cropping, 1.35 px | 31 + 19 s |
