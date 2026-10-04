@@ -24,11 +24,27 @@ extension ImageLoader {
         return (1...8).contains(value) ? value : 1
     }
 
+    /// A photo decoded and drawn at its own size, before stored(_:target:) resamples it: one decoding can give
+    /// copies at several sizes.
+    struct Drawn {
+        var url: URL
+        var width: Int
+        var height: Int
+        var orientation: Int32
+        var pixels: [UInt16]
+        var highBitDepth: Bool
+    }
+
     /// The full image decoded by ImageIO (not the thumbnail path, which decodes JPEG slightly differently),
     /// at a size that becomes `target` once oriented. 8-bit sources come out as 257 x v. The photo is drawn
     /// at its own size and resampled with vImage, whose pixel centres map as (x + 0.5) * r - 0.5, the map the
     /// compositor places copies by; CoreGraphics would map corner pixels to corner pixels instead.
     static func stored(_ image: SourceImage, target: PixelSize, space: CGColorSpace) throws -> StoredPixels {
+        try stored(drawn(image, space: space), target: target)
+    }
+
+    /// The decoding and drawing of stored(_:target:space:).
+    static func drawn(_ image: SourceImage, space: CGColorSpace) throws -> Drawn {
         guard let source = CGImageSourceCreateWithURL(image.url as CFURL, nil) else {
             throw StitchError.cannotOpen(image.url)
         }
@@ -40,25 +56,31 @@ extension ImageLoader {
         let oriented = swapped ? PixelSize(width: decoded.height, height: decoded.width)
             : PixelSize(width: decoded.width, height: decoded.height)
         guard oriented == image.pixelSize else { throw StitchError.photoChanged(image.url) }
+        return Drawn(url: image.url, width: decoded.width, height: decoded.height, orientation: orientation,
+                     pixels: try draw(decoded, space: space, url: image.url), highBitDepth: decoded.bitsPerComponent > 8)
+    }
+
+    /// The resampling of stored(_:target:space:).
+    static func stored(_ drawn: Drawn, target: PixelSize) throws -> StoredPixels {
+        let swapped = (5...8).contains(drawn.orientation)
         let width = swapped ? target.height : target.width, height = swapped ? target.width : target.height
-        let full = try draw(decoded, space: space, url: image.url)
-        if width == decoded.width && height == decoded.height {
-            return StoredPixels(width: width, height: height, orientation: orientation, pixels: full,
-                                highBitDepth: decoded.bitsPerComponent > 8)
+        if width == drawn.width && height == drawn.height {
+            return StoredPixels(width: width, height: height, orientation: drawn.orientation, pixels: drawn.pixels,
+                                highBitDepth: drawn.highBitDepth)
         }
         var pixels = [UInt16](unsafeUninitializedCapacity: width * height * 4) { _, count in count = width * height * 4 }
-        let status = full.withUnsafeBufferPointer { input in
+        let status = drawn.pixels.withUnsafeBufferPointer { input in
             pixels.withUnsafeMutableBufferPointer { output in
-                var from = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: input.baseAddress), height: vImagePixelCount(decoded.height),
-                                         width: vImagePixelCount(decoded.width), rowBytes: decoded.width * 8)
+                var from = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: input.baseAddress), height: vImagePixelCount(drawn.height),
+                                         width: vImagePixelCount(drawn.width), rowBytes: drawn.width * 8)
                 var to = vImage_Buffer(data: output.baseAddress, height: vImagePixelCount(height), width: vImagePixelCount(width),
                                        rowBytes: width * 8)
                 return vImageScale_ARGB16U(&from, &to, nil, vImage_Flags(kvImageHighQualityResampling))
             }
         }
-        guard status == kvImageNoError else { throw StitchError.cannotDecode(image.url) }
-        return StoredPixels(width: width, height: height, orientation: orientation, pixels: pixels,
-                            highBitDepth: decoded.bitsPerComponent > 8)
+        guard status == kvImageNoError else { throw StitchError.cannotDecode(drawn.url) }
+        return StoredPixels(width: width, height: height, orientation: drawn.orientation, pixels: pixels,
+                            highBitDepth: drawn.highBitDepth)
     }
 
     /// RGBX, 16 bits per channel, of `image` at its own size in `space`, transparent areas white.
@@ -382,7 +404,7 @@ extension StitchEngine {
         meter.finish()
         let worker = compositor
         let (pixels, crop) = try await withTaskCancellationHandler {
-            try Self.composite(worker, images: images, space: space, progress: progress, timings: &timings)
+            try await Self.composite(worker, images: images, space: space, progress: progress, timings: &timings)
         } onCancel: {
             worker.cancel()
         }
@@ -408,12 +430,30 @@ extension StitchEngine {
     private static func composite(
         _ compositor: Compositor, images: [SourceImage], space: CGColorSpace,
         progress: (@Sendable (ProgressEvent) -> Void)?, timings: inout PanoramaTimings
-    ) throws -> (PanoramaPixels, PixelRect) {
+    ) async throws -> (PanoramaPixels, PixelRect) {
         var clock = ContinuousClock.now
+        // Decoding and drawing a photo in 16 bits took most of both passes, one photo after another: the photos
+        // are now decoded ahead on several cores while the compositor takes them in order, and the first pass
+        // also keeps the output copies when they fit, so that each photo is decoded once. A copy depends on its
+        // photo alone, so the panorama is the same.
+        let seamSizes = images.indices.map { compositor.seamSize($0) }
+        let outputSizes = images.indices.map { compositor.imageSize($0) }
+        let memory = Double(ProcessInfo.processInfo.physicalMemory)
+        let drawnBytes = Double(images.map { 8 * $0.pixelSize.width * $0.pixelSize.height }.max() ?? 1)
+        let outputBytes = outputSizes.map { Double(8 * $0.width * $0.height) }
+        let keep = outputBytes.reduce(0, +) <= 0.1 * memory
+        func ahead(_ bytes: Double) -> Int {
+            max(1, min(ProcessInfo.processInfo.activeProcessorCount, Int(0.1 * memory / max(1, bytes))))
+        }
+        var kept: [StoredPixels?] = Array(repeating: nil, count: images.count)
         progress?(ProgressEvent(stage: "seams", completed: 0, total: images.count))
-        for (index, image) in images.enumerated() {
-            try Task.checkCancellation()
-            try compositor.addSeamImage(index, ImageLoader.stored(image, target: compositor.seamSize(index), space: space))
+        try await inOrder(images.count, ahead: ahead(drawnBytes + (keep ? outputBytes.max() ?? 0 : 0))) { index in
+            let drawn = try ImageLoader.drawn(images[index], space: space)
+            return (try ImageLoader.stored(drawn, target: seamSizes[index]),
+                    keep ? try ImageLoader.stored(drawn, target: outputSizes[index]) : nil)
+        } consume: { index, copies in
+            try compositor.addSeamImage(index, copies.0)
+            kept[index] = copies.1
             progress?(ProgressEvent(stage: "seams", completed: index + 1, total: images.count))
         }
         let meter = WorkMeter(stage: "exposure", emit: progress)
@@ -423,12 +463,24 @@ extension StitchEngine {
         clock = ContinuousClock.now
         progress?(ProgressEvent(stage: "compose", completed: 0, total: images.count))
         var highBitDepth = false
-        for (index, image) in images.enumerated() {
-            try Task.checkCancellation()
-            let stored = try ImageLoader.stored(image, target: compositor.imageSize(index), space: space)
+        func add(_ index: Int, _ stored: StoredPixels) throws {
             highBitDepth = highBitDepth || stored.highBitDepth
             try compositor.addImage(index, stored)
             progress?(ProgressEvent(stage: "compose", completed: index + 1, total: images.count))
+        }
+        if keep {
+            for index in images.indices {
+                try Task.checkCancellation()
+                guard let stored = kept[index] else { continue }
+                kept[index] = nil
+                try add(index, stored)
+            }
+        } else {
+            try await inOrder(images.count, ahead: ahead(drawnBytes + (outputBytes.max() ?? 0))) { index in
+                try ImageLoader.stored(images[index], target: outputSizes[index], space: space)
+            } consume: { index, stored in
+                try add(index, stored)
+            }
         }
         timings.compositing = (ContinuousClock.now - clock).seconds
         clock = ContinuousClock.now
@@ -437,5 +489,35 @@ extension StitchEngine {
         result.0.highBitDepth = highBitDepth
         timings.blending = (ContinuousClock.now - clock).seconds
         return result
+    }
+}
+
+/// Runs `produce` for 0..<count, at most `ahead` at a time on the cooperative pool, and gives the results to
+/// `consume` on the calling task in the order of the indices. A result waits for the ones before it, so at most
+/// `ahead` are held at a time.
+func inOrder<T: Sendable>(_ count: Int, ahead: Int, produce: @escaping @Sendable (Int) throws -> T,
+                          consume: (Int, T) throws -> Void) async throws {
+    try await withThrowingTaskGroup(of: (Int, T).self) { group in
+        var next = 0, done = 0
+        var waiting: [Int: T] = [:]
+        func start() {
+            guard next < count else { return }
+            let index = next
+            next += 1
+            group.addTask {
+                try Task.checkCancellation()
+                return (index, try produce(index))
+            }
+        }
+        for _ in 0..<max(1, ahead) { start() }
+        while done < count, let (index, value) = try await group.next() {
+            waiting[index] = value
+            while let ready = waiting.removeValue(forKey: done) {
+                try Task.checkCancellation()
+                try consume(done, ready)
+                done += 1
+                start()
+            }
+        }
     }
 }

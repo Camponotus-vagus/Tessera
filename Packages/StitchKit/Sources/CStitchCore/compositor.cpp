@@ -7,10 +7,13 @@
 
 #include "stitchcore.h"
 
+#include <dispatch/dispatch.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <string>
@@ -272,8 +275,12 @@ cv::Scalar as_scalar(const cv::Mat &single) {
 // Finds the seams one pair of photos at a time, checking for cancellation in between. OpenCV's finders
 // work pair by pair too, in the same order: GraphCut takes the pairs as i < j, DP by decreasing distance
 // between the photos' centres (its private ImagePairLess, then reversed).
-void find_seams(sc_compositor &c, const std::vector<cv::UMat> &images, cv::Ptr<cd::SeamFinder> finder,
-                const std::function<void(double)> &step) {
+// Seams pair by pair, in a fixed order, each pair moving the masks of its two photos. A pair waits only for the
+// earlier pairs of its photos: the pairs go in rounds, each pair one round after the last earlier pair that
+// shares a photo with it, and the pairs of a round, which share no photo, run at once with a finder each.
+// Every pair then finds its photos' masks as the order left them, so the seams are the same as one by one.
+void find_seams(sc_compositor &c, const std::vector<cv::UMat> &images,
+                const std::function<cv::Ptr<cd::SeamFinder>()> &make_finder, const std::function<void(double)> &step) {
     std::vector<std::pair<size_t, size_t>> pairs;
     for (size_t i = 0; i + 1 < images.size(); ++i)
         for (size_t j = i + 1; j < images.size(); ++j) pairs.emplace_back(i, j);
@@ -292,14 +299,39 @@ void find_seams(sc_compositor &c, const std::vector<cv::UMat> &images, cv::Ptr<c
     for (const auto &[i, j] : pairs) {
         if (cd::overlapRoi(c.seam_corners[i], c.seam_corners[j], images[i].size(), images[j].size(), overlap)) ++total;
     }
+    std::vector<int> latest(images.size(), -1);  // round of the last pair so far that each photo is in
+    std::vector<std::vector<std::pair<size_t, size_t>>> rounds;
     for (const auto &[i, j] : pairs) {
-        check(c);
         if (!cd::overlapRoi(c.seam_corners[i], c.seam_corners[j], images[i].size(), images[j].size(), overlap)) continue;
-        step(total ? double(done++) / total : 1.0);
-        // The headers share the masks' data, so the finder updates c.seam_masks in place.
-        std::vector<cv::UMat> pair_images{images[i], images[j]}, pair_masks{c.seam_masks[i], c.seam_masks[j]};
-        const std::vector<cv::Point> pair_corners{c.seam_corners[i], c.seam_corners[j]};
-        finder->find(pair_images, pair_corners, pair_masks);
+        const int round = std::max(latest[i], latest[j]) + 1;
+        if (round == static_cast<int>(rounds.size())) rounds.emplace_back();
+        rounds[round].emplace_back(i, j);
+        latest[i] = latest[j] = round;
+    }
+    for (const auto &round : rounds) {
+        check(c);
+        step(total ? double(done) / total : 1.0);
+        std::vector<std::exception_ptr> failed(round.size());
+        const auto *list = &round;
+        auto *errors = &failed;
+        const auto *make = &make_finder;
+        sc_compositor *compositor = &c;
+        const std::vector<cv::UMat> *all = &images;
+        dispatch_apply(round.size(), DISPATCH_APPLY_AUTO, ^(size_t k) {
+            try {
+                const auto [i, j] = (*list)[k];
+                // The headers share the masks' data, so the finder updates the seam masks in place.
+                std::vector<cv::UMat> pair_images{(*all)[i], (*all)[j]};
+                std::vector<cv::UMat> pair_masks{compositor->seam_masks[i], compositor->seam_masks[j]};
+                const std::vector<cv::Point> pair_corners{compositor->seam_corners[i], compositor->seam_corners[j]};
+                (*make)()->find(pair_images, pair_corners, pair_masks);
+            } catch (...) {
+                (*errors)[k] = std::current_exception();
+            }
+        });
+        for (const std::exception_ptr &error : failed)
+            if (error) std::rethrow_exception(error);
+        done += round.size();
     }
 }
 
@@ -524,12 +556,14 @@ extern "C" int32_t sc_compositor_prepare(sc_compositor *c, const sc_progress *pr
         if (c->options.seam != SC_SEAM_NONE && c->count > 1) {
             std::vector<cv::UMat> images(c->count);
             for (int i = 0; i < c->count; ++i) c->seam_images[i].convertTo(images[i], CV_32F);
-            cv::Ptr<cd::SeamFinder> finder;
-            switch (c->options.seam) {
-                case SC_SEAM_VORONOI: finder = cv::makePtr<cd::VoronoiSeamFinder>(); break;
-                case SC_SEAM_DP: finder = cv::makePtr<cd::DpSeamFinder>(cd::DpSeamFinder::COLOR_GRAD); break;
-                default: finder = cv::makePtr<cd::GraphCutSeamFinder>(cd::GraphCutSeamFinderBase::COST_COLOR_GRAD); break;
-            }
+            const sc_seam seam = c->options.seam;
+            auto finder = [seam]() -> cv::Ptr<cd::SeamFinder> {
+                switch (seam) {
+                    case SC_SEAM_VORONOI: return cv::makePtr<cd::VoronoiSeamFinder>();
+                    case SC_SEAM_DP: return cv::makePtr<cd::DpSeamFinder>(cd::DpSeamFinder::COLOR_GRAD);
+                    default: return cv::makePtr<cd::GraphCutSeamFinder>(cd::GraphCutSeamFinderBase::COST_COLOR_GRAD);
+                }
+            };
             find_seams(*c, images, finder, [&](double fraction) { report(gains_share + (1 - gains_share) * fraction); });
         }
         report(1);
