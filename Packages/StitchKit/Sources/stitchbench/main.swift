@@ -18,6 +18,7 @@ struct Options {
     var saveReport: URL?
     var loadReport: URL?
     var modeGiven = false
+    var exact = false
     var repeats = 1
     var files: [URL] = []
 }
@@ -31,7 +32,7 @@ func usage(_ problem: String? = nil) -> Never {
                        [--low-memory] [--onnx-select] [--align] [--repeat N]
                        [--stitch file.jpg|png|tif|heic] [--projection automatic|flat|rectilinear|cylindrical|spherical]
                        [--scale 0.5] [--original-pixels] [--exposure channels|blocks|none] [--crop|--no-crop] [--out dir]
-                       [--save-report file.json] images...
+                       [--save-report file.json] [--exact] images...
            stitchbench --load-report file.json [--mode ...] [--align] [--stitch file] ...
            stitchbench --download-models [images...]
     """)
@@ -114,6 +115,7 @@ func parse() -> Options {
         case "--out": options.output = URL(fileURLWithPath: value(argument), isDirectory: true)
         case "--save-report": options.saveReport = URL(fileURLWithPath: value(argument))
         case "--load-report": options.loadReport = URL(fileURLWithPath: value(argument))
+        case "--exact": options.exact = true
         case "-h", "--help": usage()
         case let option where option.hasPrefix("--"): usage("unknown option \(option)")
         default: options.files.append(URL(fileURLWithPath: argument))
@@ -249,13 +251,23 @@ func run() async throws {
         let start = ContinuousClock.now
         let summary = try engine.align(report)
         let elapsed = ContinuousClock.now - start
-        print("\nalignment: \(summary.model.rawValue), rms \(format(summary.rms))px, anchor \(summary.anchor), " +
-              "\(elapsed.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow)))")
-        if summary.model == .rotation {
-            print("  focal " + summary.focals.map { format($0, 0) }.joined(separator: " "))
+        // --exact: every digit, and the time on standard error, so that two builds' outputs can be diffed.
+        if options.exact {
+            let exact = { (value: Double) in String(format: "%.17g", value) }
+            print("\nalignment: \(summary.model.rawValue), rms \(exact(summary.rms)), anchor \(summary.anchor)")
+            print("  focal " + summary.focals.map(exact).joined(separator: " "))
+            for (a, b, rms) in summary.pairs { print("  \(a) - \(b): \(exact(rms))") }
+            for note in summary.notes { print("  note: \(note)") }
+            warn("alignment took \(elapsed.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow)))")
+        } else {
+            print("\nalignment: \(summary.model.rawValue), rms \(format(summary.rms))px, anchor \(summary.anchor), " +
+                  "\(elapsed.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow)))")
+            if summary.model == .rotation {
+                print("  focal " + summary.focals.map { format($0, 0) }.joined(separator: " "))
+            }
+            for (a, b, rms) in summary.pairs { print("  \(a) - \(b): \(format(rms))px") }
+            for note in summary.notes { print("  note: \(note)") }
         }
-        for (a, b, rms) in summary.pairs { print("  \(a) - \(b): \(format(rms))px") }
-        for note in summary.notes { print("  note: \(note)") }
     }
 
     if let file = options.stitch {
