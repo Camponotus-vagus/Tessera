@@ -1,6 +1,7 @@
 import CStitchCore
 import Foundation
 import simd
+import Synchronization
 
 public struct ProgressEvent: Sendable, Equatable {
     public var stage: String
@@ -29,6 +30,8 @@ public actor StitchEngine {
     private var learned: LearnedSession?
     /// A session being built, so concurrent analyses wait for it instead of building their own.
     private var loading: (key: String, task: Task<LearnedSession, Error>)?
+    /// The alignment of the last stitch, which a stitch of the same report with other output settings reuses.
+    nonisolated let lastAlignment = Mutex<(key: AlignmentOutcome.Key, outcome: AlignmentOutcome)?>(nil)
 
     public init() {}
 
@@ -182,6 +185,12 @@ public actor StitchEngine {
     /// Throws only when cancelled. The provisional alignments advance `progress`.
     nonisolated static func overlapping(_ report: MatchReport, tried: Set<PairProposal.Key>, perPhoto: Int,
                                         progress: WorkSpan = .none) throws -> [CandidatePair] {
+        // The two layouts share their solves.
+        try SolveMemo.scope { try overlappingNow(report, tried: tried, perPhoto: perPhoto, progress: progress) }
+    }
+
+    private nonisolated static func overlappingNow(_ report: MatchReport, tried: Set<PairProposal.Key>, perPhoto: Int,
+                                                   progress: WorkSpan) throws -> [CandidatePair] {
         let component = report.graph.components.first ?? []
         let estimate = AlignmentCost.size(report, component: component)
         let layout = AlignmentCost.build * Double(estimate.pairs)

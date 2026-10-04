@@ -159,6 +159,21 @@ struct AlignmentProgressTests {
         }
     }
 
+    @Test("Solves repeated within one alignment come from the memo and change nothing")
+    func memo() throws {
+        let problem = Self.misplacedGrid(columns: 8, rows: 5)
+        let plain = try Aligner.align(problem, mode: .auto, centre: 19, straighten: false)
+        let memo = SolveMemo()
+        let shared = try SolveMemo.$current.withValue(memo) {
+            try Aligner.align(problem, mode: .auto, centre: 19, straighten: false)
+        }
+        #expect(Self.bits(plain.alignment) == Self.bits(shared.alignment))
+        #expect(plain.problem.images.map(\.id) == shared.problem.images.map(\.id))
+        #expect(plain.problem.pairs.map { [$0.a, $0.b] } == shared.problem.pairs.map { [$0.a, $0.b] })
+        #expect(plain.misplaced == shared.misplaced && plain.notes == shared.notes)
+        #expect(memo.tally.hits > 0, "\(memo.tally)")
+    }
+
     /// Counts the calls of the progress callback and asks for a stop at call `stopAt`.
     private final class Counter {
         var calls = 0

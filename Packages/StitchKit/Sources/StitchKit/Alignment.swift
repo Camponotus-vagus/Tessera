@@ -1,6 +1,7 @@
 import CStitchCore
 import Foundation
 import simd
+import Synchronization
 
 /// The correspondences that drive global alignment, one set per verified pair of the main group.
 struct AlignmentProblem: Sendable {
@@ -36,17 +37,14 @@ struct AlignmentProblem: Sendable {
         let thresholds = images.map {
             configuration.inlierThreshold * (Double($0.pixelSize.width * $0.pixelSize.height) / 1_000_000).squareRoot()
         }
-        var grouped: [PairProposal.Key: [PairEvidence]] = [:]
-        for evidence in report.pairs where evidence.verdict == .verified && evidence.chosenFit != nil {
-            guard let a = index[evidence.a], let b = index[evidence.b] else { continue }
-            grouped[PairProposal.Key(a, b), default: []].append(evidence)
+        var evidence: [PairProposal.Key: [PairEvidence]] = [:]
+        for item in report.pairs where item.verdict == .verified && item.chosenFit != nil {
+            guard let a = index[item.a], let b = index[item.b] else { continue }
+            evidence[PairProposal.Key(a, b), default: []].append(item)
         }
+        let grouped = evidence
 
-        var pairs: [Pair] = []
-        let keys = grouped.keys.sorted()
-        for (done, key) in keys.enumerated() {
-            if done % 32 == 0 { try Task.checkCancellation() }
-            progress.report(Double(done) / Double(keys.count))
+        @Sendable func pair(_ key: PairProposal.Key) -> Pair? {
             let sources = grouped[key]!.sorted { $0.source.rawValue < $1.source.rawValue }
             var candidates: [(point: SIMD4<Float>, sigma: Float)] = []
             var perSource: [(source: FeatureSource, points: [SIMD4<Float>], sigma: Float, transform: [Double])] = []
@@ -64,7 +62,7 @@ struct AlignmentProblem: Sendable {
                 perSource.append((evidence.source, points, sigma, transform))
                 candidates += points.map { ($0, sigma) }
             }
-            guard let best = perSource.max(by: { $0.points.count < $1.points.count }) else { continue }
+            guard let best = perSource.max(by: { $0.points.count < $1.points.count }) else { return nil }
             let threshold = thresholds[key.b]
             var union = deduplicate(candidates, radius: Float(0.5 * threshold))
             var homography = best.transform
@@ -83,15 +81,30 @@ struct AlignmentProblem: Sendable {
                 set.points.count >= 40
                     ? stratified(set.points.map { ($0, set.sigma) }, size: images[key.a].pixelSize, cap: cap) : nil
             }
-            pairs.append(Pair(
+            return Pair(
                 a: key.a, b: key.b,
                 points: spread.flatMap { [$0.point.x, $0.point.y, $0.point.z, $0.point.w] },
                 sigmas: spread.map(\.sigma), homography: homography,
                 siftPoints: siftSpread?.flatMap { [$0.point.x, $0.point.y, $0.point.z, $0.point.w] } ?? [],
                 siftSigmas: siftSpread?.map(\.sigma) ?? []
-            ))
+            )
         }
-        return AlignmentProblem(images: images, pairs: pairs, thresholds: thresholds)
+
+        // The pairs are independent and each refit is seeded: on all cores, in the order of their keys, a
+        // batch at a time so that Stop and the bar keep up.
+        let keys = grouped.keys.sorted()
+        var built = [Pair?](repeating: nil, count: keys.count)
+        try built.withUnsafeMutableBufferPointer { buffer in
+            nonisolated(unsafe) let slots = buffer
+            for start in stride(from: 0, to: keys.count, by: 64) {
+                try Task.checkCancellation()
+                progress.report(Double(start) / Double(keys.count))
+                DispatchQueue.concurrentPerform(iterations: min(64, keys.count - start)) { k in
+                    slots[start + k] = pair(keys[start + k])
+                }
+            }
+        }
+        return AlignmentProblem(images: images, pairs: built.compactMap { $0 }, thresholds: thresholds)
     }
 
     /// Keeps the more precise of two correspondences that land within `radius` of each other in both photos.
@@ -303,13 +316,58 @@ struct Alignment: Sendable {
 }
 
 /// Steps of the alignment, for its progress plans.
-private enum AlignStep: Hashable, Sendable { case choose, trialHomographies, trial, leaveOut, drop, rechoose, leaveOutAfter }
+private enum AlignStep: Hashable, Sendable { case choose, trialHomographies, trial, leaveOut, drop, rechoose, leaveOutAfter, perspective }
 private enum TrialStep: Hashable, Sendable { case document, planar }
 private enum LeaveOutStep: Hashable, Sendable { case homographies, choose }
 private enum DropStep: Hashable, Sendable { case solve, choose }
 private enum OutcomeStep: Hashable, Sendable { case build, align }
 private enum ChooseStep: Hashable, Sendable {
     case translation, similarity, affine, homographies, trial, trialRotation, rotation, fallback
+}
+
+/// Solves already done within one alignment, or within the provisional layouts of one analysis: Automatic
+/// mode reaches the same solve along several paths (its Document trial, leaving photos out, the rotation
+/// trial on 40 photos), five times for the homographies of 524 drone photos. The solvers give the same bits
+/// for the same input, so a stored result is the one a new solve would give. The problems of one scope come
+/// from one report, so photo ids, the pairs between them and their sizes name a problem.
+final class SolveMemo: Sendable {
+    struct Key: Hashable, Sendable {
+        var model: GlobalModel
+        var anchor: Int
+        var straighten: Bool
+        var images: [Int]
+        /// Photo ids and correspondence count of each pair, in order.
+        var pairs: [Int]
+    }
+
+    private let results = Mutex<[Key: Result<Alignment, StitchError>]>([:])
+    private let counts = Mutex<(hits: Int, solves: Int)>((0, 0))
+
+    static func key(_ model: GlobalModel, _ problem: AlignmentProblem, anchor: Int, straighten: Bool) -> Key {
+        Key(model: model, anchor: anchor, straighten: model == .rotation && straighten,
+            images: problem.images.map(\.id),
+            pairs: problem.pairs.flatMap { [problem.images[$0.a].id, problem.images[$0.b].id, $0.points.count, $0.siftPoints.count] })
+    }
+
+    func result(_ key: Key) -> Result<Alignment, StitchError>? {
+        let stored = results.withLock { $0[key] }
+        counts.withLock { stored == nil ? ($0.solves += 1) : ($0.hits += 1) }
+        return stored
+    }
+
+    func store(_ key: Key, _ result: Result<Alignment, StitchError>) { results.withLock { $0[key] = result } }
+
+    /// For tests: solves answered from the memo, and solves run.
+    var tally: (hits: Int, solves: Int) { counts.withLock { $0 } }
+
+    /// The memo of the current alignment, if any.
+    @TaskLocal static var current: SolveMemo?
+
+    /// Runs `body` with a memo: the current one, or a new one when there is none.
+    static func scope<R>(_ body: () throws -> R) rethrows -> R {
+        if current != nil { return try body() }
+        return try $current.withValue(SolveMemo(), operation: body)
+    }
 }
 
 enum Aligner {
@@ -325,12 +383,31 @@ enum Aligner {
         try Task.checkCancellation()
         let size = AlignmentCost.size(problem), expected = AlignmentCost.solve(model, size)
         let leaf = progress.leaf(expected)
+        let memo = SolveMemo.current
+        let key = memo.map { _ in SolveMemo.key(model, problem, anchor: anchor, straighten: straighten) }
+        if let memo, let key, let stored = memo.result(key) {
+            leaf.complete()
+            ProgressTrace.log("solve \(model) photos \(size.photos) pairs \(size.pairs) from the memo")
+            return try stored.get()
+        }
         let started = ContinuousClock.now
         defer {
             leaf.complete()
             ProgressTrace.log("solve \(model) photos \(size.photos) pairs \(size.pairs) matches \(size.matches) " +
                               "rotation \(size.rotationMatches) expected \(expected) took \((ContinuousClock.now - started) / .seconds(1))")
         }
+        do {
+            let alignment = try solveNow(model, problem, anchor: anchor, straighten: straighten, leaf: leaf, monitored: monitored)
+            if let memo, let key { memo.store(key, .success(alignment)) }
+            return alignment
+        } catch let error as StitchError {
+            if let memo, let key { memo.store(key, .failure(error)) }
+            throw error
+        }
+    }
+
+    private static func solveNow(_ model: GlobalModel, _ problem: AlignmentProblem, anchor: Int, straighten: Bool,
+                                 leaf: WorkLeaf, monitored: Bool) throws -> Alignment {
         let n = problem.images.count
         let native: sc_align_model = switch model {
         case .translation: SC_ALIGN_TRANSLATION
@@ -458,9 +535,11 @@ enum Aligner {
         var plan = WorkPlan<AlignStep>(progress, [(.choose, chooseCost), (.trialHomographies, likely.trialHomographies),
                                                   (.trial, likely.trial), (.leaveOut, likely.leaveOut),
                                                   (.drop, likely.drop), (.rechoose, likely.rechoose),
-                                                  (.leaveOutAfter, likely.leaveOutAfter)])
+                                                  (.leaveOutAfter, likely.leaveOutAfter),
+                                                  (.perspective, AlignmentCost.perspective(mode, size, provisional: provisional))])
+        var perspective: PerspectiveCheck?
         var alignment = try choose(problem, mode: mode, centre: centre, straighten: straighten, provisional: provisional,
-                                   notes: &modelNotes, progress: plan.next(.choose))
+                                   notes: &modelNotes, perspective: &perspective, progress: plan.next(.choose))
         let expected = tail(alignment.model)
         plan.revise(.trialHomographies, expected.trialHomographies)
         plan.revise(.trial, expected.trial)
@@ -504,11 +583,13 @@ enum Aligner {
             try Task.checkCancellation()
         }
         // A new choice of model, or nil when it fails for any reason but cancellation.
-        func chooseAgain(_ problem: AlignmentProblem, centre: Int, progress: WorkSpan) throws -> (Alignment, [String])? {
+        func chooseAgain(_ problem: AlignmentProblem, centre: Int, progress: WorkSpan) throws
+            -> (Alignment, [String], PerspectiveCheck?)? {
             var notes: [String] = []
+            var check: PerspectiveCheck?
             do {
                 return (try choose(problem, mode: mode, centre: centre, straighten: straighten, provisional: provisional,
-                                   notes: &notes, progress: progress), notes)
+                                   notes: &notes, perspective: &check, progress: progress), notes, check)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -543,7 +624,7 @@ enum Aligner {
             let centreID = problem.images[centre].id
             let newCentre = reduced.images.firstIndex { $0.id == centreID } ?? 0
             // Kept only when the homographies win without them: a planar model placed them as well as the rest.
-            guard let (chosen, notes) = try chooseAgain(reduced, centre: newCentre, progress: steps.next(.choose)),
+            guard let (chosen, notes, check) = try chooseAgain(reduced, centre: newCentre, progress: steps.next(.choose)),
                   chosen.model == .homography else {
                 return false
             }
@@ -553,6 +634,7 @@ enum Aligner {
             centre = newCentre
             alignment = chosen
             modelNotes = notes
+            perspective = check
             return true
         }
         _ = try leaveOutMisplaced(plan.next(.leaveOut))
@@ -594,9 +676,10 @@ enum Aligner {
                resolved.rms <= alignment.rms {
                 next = resolved
                 stale = true
-            } else if let (chosen, notes) = try chooseAgain(reduced, centre: centre, progress: steps.next(.choose)) {
+            } else if let (chosen, notes, check) = try chooseAgain(reduced, centre: centre, progress: steps.next(.choose)) {
                 next = chosen
                 modelNotes = notes
+                perspective = check
                 stale = false
             } else {
                 break
@@ -609,9 +692,10 @@ enum Aligner {
         }
         try Task.checkCancellation()
         // The model was chosen with the pairs now left out.
-        if stale, let (chosen, notes) = try chooseAgain(problem, centre: centre, progress: plan.next(.rechoose)) {
+        if stale, let (chosen, notes, check) = try chooseAgain(problem, centre: centre, progress: plan.next(.rechoose)) {
             alignment = chosen
             modelNotes = notes
+            perspective = check
         }
         // Leaving photos out can bring others over the limit; a few more rounds, within the same budget.
         let leaveOutRound = AlignmentCost.homographies(size) + 0.1 * chooseCost
@@ -619,6 +703,16 @@ enum Aligner {
             guard try leaveOutMisplaced(plan.next(.leaveOutAfter, cost: leaveOutRound)) else { break }
         }
         try Task.checkCancellation()
+        // Plane mode compares the choice that stands with the homographies of its problem, for a note only.
+        if !provisional, let check = perspective {
+            if let (document, stretch) = try? homographies(check.problem, anchor: check.centre, progress: plan.next(.perspective)),
+               earnsPerspective(documentRMS: document.rms, stretch: stretch, planarRMS: check.best),
+               check.best - document.rms > 1 {
+                modelNotes.append(String(format: String(localized: "The photos show perspective: Document mode would align them to %.1f px instead of %.1f px"),
+                                         locale: .current, document.rms, check.chosen))
+            }
+            try Task.checkCancellation()
+        }
         // Each pair was verified to within its own inlier threshold: a global fit looser than that has not joined them.
         if !alignment.pairRMS.isEmpty {
             let ratios = zip(alignment.pairRMS, problem.pairs).map { $0 / problem.thresholds[$1.b] }
@@ -665,9 +759,18 @@ enum Aligner {
     /// Thrown by provisional alignments instead of solving the rotation for a large set.
     struct ProvisionalSkip: Error {}
 
+    /// Plane mode's comparison of a choice with the homographies, which only adds a note: made once, by
+    /// align(_:), for the choice that stands (it took two of the five solves of 524 drone photos).
+    struct PerspectiveCheck {
+        var problem: AlignmentProblem
+        var centre: Int
+        /// Errors of the best planar fit and of the one chosen.
+        var best: Double, chosen: Double
+    }
+
     private static func choose(_ problem: AlignmentProblem, mode: StitchMode, centre: Int, straighten: Bool,
-                               provisional: Bool = false, notes: inout [String], progress: WorkSpan = .none) throws
-        -> Alignment {
+                               provisional: Bool = false, notes: inout [String], perspective: inout PerspectiveCheck?,
+                               progress: WorkSpan = .none) throws -> Alignment {
         func simplest(_ fits: [Alignment]) -> Alignment? {
             guard let best = fits.map(\.rms).min() else { return nil }
             let tolerance = 1.25 * best + 0.5
@@ -680,7 +783,7 @@ enum Aligner {
             (.translation, mode == .plane || mode == .auto ? AlignmentCost.solve(.translation, size) : 0),
             (.similarity, mode == .plane || mode == .auto ? AlignmentCost.solve(.similarity, size) : 0),
             (.affine, mode == .plane || mode == .auto ? AlignmentCost.solve(.affine, size) : 0),
-            (.homographies, mode == .rotation ? 0 : AlignmentCost.homographies(size)),
+            (.homographies, mode == .rotation || mode == .plane ? 0 : AlignmentCost.homographies(size)),
             (.trial, mode == .auto && large ? AlignmentCost.choose(.auto, trialSize, provisional: provisional) : 0),
             (.trialRotation, mode == .auto && large
                 ? 0.5 * (AlignmentCost.rotation(trialSize) + AlignmentCost.solve(.affine, trialSize)) : 0),
@@ -699,14 +802,9 @@ enum Aligner {
             try Task.checkCancellation()
             guard let chosen = simplest(fits) else { throw StitchError.engine(String(localized: "The tiles could not be aligned")) }
             // Against the best planar fit: the simplest one may leave an error that an affine fit removes.
-            if let (document, stretch) = try? homographies(problem, anchor: centre, progress: plan.next(.homographies)),
-               let best = fits.min(by: { $0.rms < $1.rms }),
-               earnsPerspective(documentRMS: document.rms, stretch: stretch, planarRMS: best.rms),
-               best.rms - document.rms > 1 {
-                notes.append(String(format: String(localized: "The photos show perspective: Document mode would align them to %.1f px instead of %.1f px"),
-                                    locale: .current, document.rms, chosen.rms))
+            if let best = fits.min(by: { $0.rms < $1.rms }) {
+                perspective = PerspectiveCheck(problem: problem, centre: centre, best: best.rms, chosen: chosen.rms)
             }
-            try Task.checkCancellation()
             return chosen
         case .document:
             let (document, stretch) = try homographies(problem, anchor: centre, progress: plan.next(.homographies))
@@ -757,8 +855,9 @@ enum Aligner {
                 let local = AlignmentCost.size(trial.problem)
                 plan.revise(.trial, AlignmentCost.choose(.auto, local, provisional: provisional))
                 var ignored: [String] = []
+                var unused: PerspectiveCheck?
                 let model = try? choose(trial.problem, mode: .auto, centre: trial.centre, straighten: straighten,
-                                        notes: &ignored, progress: plan.next(.trial))
+                                        notes: &ignored, perspective: &unused, progress: plan.next(.trial))
                 try Task.checkCancellation()
                 var wins = model?.model == .rotation
                 if !wins, documentStretched {
@@ -807,7 +906,34 @@ enum Aligner {
 }
 
 /// The global alignment of a report's main group.
-struct AlignmentOutcome {
+struct AlignmentOutcome: Sendable {
+    /// The analysis an alignment comes from: its creation time names it (every analysis makes a new report),
+    /// and the other fields guard against a report edited since, for the inputs the alignment reads. The
+    /// photos' paths and names are not in it: a stored outcome takes them from the report it is used for.
+    struct Key: Hashable, Sendable {
+        var created: Date
+        var configuration: Data
+        var straighten: Bool
+        var images: [Int]
+        var focals: [UInt64]
+        var component: [Int]
+        /// Photo ids, source, verdict, model and inlier count of every pair.
+        var evidence: [Int]
+
+        init(_ report: MatchReport, straighten: Bool) {
+            created = report.createdAt
+            configuration = (try? JSONEncoder().encode(report.configuration)) ?? Data()
+            self.straighten = straighten
+            images = report.images.flatMap { [$0.id, $0.pixelSize.width, $0.pixelSize.height] }
+            focals = report.images.map { $0.focalLength35mm?.bitPattern ?? 0 }
+            component = report.graph.components.first ?? []
+            evidence = report.pairs.flatMap { pair in
+                [pair.a, pair.b, pair.source.hashValue, pair.verdict.hashValue, pair.chosenModel?.hashValue ?? -1,
+                 pair.inlierCount, pair.matches.count]
+            }
+        }
+    }
+
     var problem: AlignmentProblem
     var alignment: Alignment
     var notes: [String]
@@ -881,6 +1007,11 @@ extension StitchEngine {
     /// alone joined.
     static func alignment(for report: MatchReport, straighten: Bool, provisional: Bool = false,
                           progress: WorkSpan = .none) throws -> AlignmentOutcome {
+        try SolveMemo.scope { try alignmentNow(for: report, straighten: straighten, provisional: provisional, progress: progress) }
+    }
+
+    private static func alignmentNow(for report: MatchReport, straighten: Bool, provisional: Bool,
+                                     progress: WorkSpan) throws -> AlignmentOutcome {
         guard let component = report.graph.components.first, component.count >= 2 else {
             throw StitchError.nothingToStitch
         }

@@ -138,11 +138,11 @@ struct WorkPlan<Step: Hashable & Sendable>: Sendable {
     }
 }
 
-/// Expected seconds of the alignment's steps on an M5 MacBook Air, from the size of the problem. They only shape
-/// the progress bar and never feed a result; the constants come from 291 timed solves on sets of 4 to 524 photos
-/// (TESSERA_PROGRESS_TRACE=1). The linear fits were within 20% of their times; a homography's time varies with
-/// its iterations (1 to 12 µs a match, the latter at the cap of 60), a rotation's ten times either way with how
-/// soon its bundle adjustment converges.
+/// Expected seconds of the alignment's steps on an M5 MacBook Air (10 cores), from the size of the problem. They
+/// only shape the progress bar and never feed a result; the constants come from 162 timed solves on sets of 6 to
+/// 524 photos (TESSERA_PROGRESS_TRACE=1). The linear fits are within 20% of their times; a homography's time
+/// varies with its iterations (0.3 to 1.5 µs a match), a rotation's several times either way with how soon its
+/// bundle adjustment converges, which the matches it uses predict better than the number of photos.
 enum AlignmentCost {
     struct Size: Sendable {
         /// Photos, pairs, matches, and matches the rotation uses.
@@ -179,24 +179,25 @@ enum AlignmentCost {
                     rotationMatches: best.values.reduce(0) { $0 + min($1, cap) })
     }
 
-    static var build: Double { 7e-4 }
+    static var build: Double { 1.5e-4 }
 
     static func solve(_ model: GlobalModel, _ s: Size) -> Double {
         let m = Double(s.matches)
         return switch model {
-        case .translation: 0.23e-6 * m + 1e-3
-        case .similarity: 0.42e-6 * m + 1e-3
-        case .affine: 0.7e-6 * m + 1e-3
-        case .homography: 8e-6 * m + 2e-3
+        case .translation: 3.4e-8 * m + 2e-4
+        case .similarity: 5.4e-8 * m + 2e-4
+        case .affine: 7.8e-8 * m + 3e-4
+        case .homography: 7.2e-7 * m + 2e-3
         case .rotation: rotation(s)
         }
     }
 
-    /// The dense J^T J product of the bundle adjustment, rows of matches times columns of photos squared, over
-    /// a typical number of iterations.
+    /// The bundle adjustment over a typical number of iterations: its Jacobian, pair by pair, grows with the
+    /// matches, and its dense J^T J product with the matches times the photos squared, which takes over with
+    /// hundreds of photos.
     static func rotation(_ s: Size) -> Double {
-        let n = Double(s.photos)
-        return 1.5e-7 * n * n * Double(s.rotationMatches) + 1e-2
+        let n = Double(s.photos), m = Double(s.rotationMatches)
+        return 6e-5 * m + 1e-8 * n * n * m + 1e-2
     }
 
     /// Homographies and, often, a second solve on a better anchor.
@@ -206,7 +207,7 @@ enum AlignmentCost {
 
     static func choose(_ mode: StitchMode, _ s: Size, provisional: Bool) -> Double {
         switch mode {
-        case .plane: return planar(s) + homographies(s)
+        case .plane: return planar(s)
         case .document: return homographies(s)
         case .rotation:
             return provisional && s.photos > Aligner.rotationTrial.limit ? 0 : rotation(s) + 0.2 * homographies(s)
@@ -236,6 +237,11 @@ enum AlignmentCost {
                 leaveOutAfter: leaves ? homographies(s) + 0.1 * chosen : 0)
     }
 
+    /// Plane mode's note on perspective, made once at the end of an alignment that is not provisional.
+    static func perspective(_ mode: StitchMode, _ s: Size, provisional: Bool) -> Double {
+        mode == .plane && !provisional ? homographies(s) : 0
+    }
+
     /// The model a mode most likely ends with, before it is chosen.
     static func likelyModel(_ mode: StitchMode) -> GlobalModel {
         switch mode {
@@ -248,7 +254,7 @@ enum AlignmentCost {
     static func align(_ mode: StitchMode, _ s: Size, provisional: Bool, automaticTrial: Bool = false) -> Double {
         let rest = tail(mode, model: likelyModel(mode), s, provisional: provisional, automaticTrial: automaticTrial)
         return choose(mode, s, provisional: provisional) + rest.trialHomographies + rest.trial + rest.leaveOut + rest.drop
-            + rest.rechoose + rest.leaveOutAfter
+            + rest.rechoose + rest.leaveOutAfter + perspective(mode, s, provisional: provisional)
     }
 }
 

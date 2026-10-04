@@ -280,8 +280,18 @@ extension StitchEngine {
         var timings = PanoramaTimings()
         // The alignment, then about 2 ms a photo for the layout and the compositor.
         let meter = WorkMeter(stage: "align", emit: progress)
-        let outcome = try Self.alignment(for: report, straighten: request.straighten,
+        let key = AlignmentOutcome.Key(report, straighten: request.straighten)
+        let outcome: AlignmentOutcome
+        if let last = lastAlignment.withLock({ $0 }), last.key == key {
+            var reused = last.outcome
+            let current = Dictionary(uniqueKeysWithValues: report.images.map { ($0.id, $0) })
+            reused.problem.images = reused.problem.images.map { current[$0.id] ?? $0 }
+            outcome = reused
+        } else {
+            outcome = try Self.alignment(for: report, straighten: request.straighten,
                                          progress: meter.begin(after: 2e-3 * Double(report.images.count)))
+            lastAlignment.withLock { $0 = (key, outcome) }
+        }
         let problem = outcome.problem, alignment = outcome.alignment
         var notes = outcome.notes
         let images = problem.images
