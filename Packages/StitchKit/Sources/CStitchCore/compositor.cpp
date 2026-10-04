@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@
 #include <opencv2/stitching/detail/warpers.hpp>
 
 #include "common.hpp"
+#include "progress.hpp"
 
 using stitchcore::write_error;
 namespace cd = cv::detail;
@@ -270,7 +272,8 @@ cv::Scalar as_scalar(const cv::Mat &single) {
 // Finds the seams one pair of photos at a time, checking for cancellation in between. OpenCV's finders
 // work pair by pair too, in the same order: GraphCut takes the pairs as i < j, DP by decreasing distance
 // between the photos' centres (its private ImagePairLess, then reversed).
-void find_seams(sc_compositor &c, const std::vector<cv::UMat> &images, cv::Ptr<cd::SeamFinder> finder) {
+void find_seams(sc_compositor &c, const std::vector<cv::UMat> &images, cv::Ptr<cd::SeamFinder> finder,
+                const std::function<void(double)> &step) {
     std::vector<std::pair<size_t, size_t>> pairs;
     for (size_t i = 0; i + 1 < images.size(); ++i)
         for (size_t j = i + 1; j < images.size(); ++j) pairs.emplace_back(i, j);
@@ -283,10 +286,16 @@ void find_seams(sc_compositor &c, const std::vector<cv::UMat> &images, cv::Ptr<c
         std::sort(pairs.begin(), pairs.end(), [&](const auto &l, const auto &r) { return distance(l) < distance(r); });
         std::reverse(pairs.begin(), pairs.end());
     }
+    // Only the pairs that overlap count towards the progress: they are the ones that take time.
+    size_t total = 0, done = 0;
+    cv::Rect overlap;
+    for (const auto &[i, j] : pairs) {
+        if (cd::overlapRoi(c.seam_corners[i], c.seam_corners[j], images[i].size(), images[j].size(), overlap)) ++total;
+    }
     for (const auto &[i, j] : pairs) {
         check(c);
-        cv::Rect overlap;
         if (!cd::overlapRoi(c.seam_corners[i], c.seam_corners[j], images[i].size(), images[j].size(), overlap)) continue;
+        step(total ? double(done++) / total : 1.0);
         // The headers share the masks' data, so the finder updates c.seam_masks in place.
         std::vector<cv::UMat> pair_images{images[i], images[j]}, pair_masks{c.seam_masks[i], c.seam_masks[j]};
         const std::vector<cv::Point> pair_corners{c.seam_corners[i], c.seam_corners[j]};
@@ -458,14 +467,25 @@ extern "C" int32_t sc_compositor_add_seam_image(sc_compositor *c, int32_t index,
     }
 }
 
-extern "C" int32_t sc_compositor_prepare(sc_compositor *c, char *error, size_t error_length) {
+extern "C" int32_t sc_compositor_prepare(sc_compositor *c, const sc_progress *progress, char *error,
+                                         size_t error_length) {
     if (c == nullptr || c->prepared ||
         !std::all_of(c->seam_added.begin(), c->seam_added.end(), [](bool v) { return v; })) {
         write_error(error, error_length, "every seam image must be added once before preparing");
         return 1;
     }
-    try {
+    stitchcore::Monitor monitor(progress);
+    // A stop asked through `progress` works as sc_compositor_cancel.
+    auto report = [&](double fraction) {
+        if (!monitor.poll(fraction)) c->cancelled.store(true);
         check(*c);
+    };
+    // Shares of the call: the exposure gains, then the seams.
+    const bool exposure = c->options.exposure != SC_EXPOSURE_NONE;
+    const bool seams = c->options.seam != SC_SEAM_NONE && c->count > 1;
+    const double gains_share = !exposure ? 0 : seams ? 0.3 : 0.9;
+    try {
+        report(0);
         if (c->canvas.width > SC_MAX_PANORAMA_SIDE || c->canvas.height > SC_MAX_PANORAMA_SIDE) {
             throw std::runtime_error("the panorama would be " + std::to_string(c->canvas.width) + " x " +
                                      std::to_string(c->canvas.height) + " pixels, more than " +
@@ -492,6 +512,7 @@ extern "C" int32_t sc_compositor_prepare(sc_compositor *c, char *error, size_t e
                 }
             }
             compensator->feed(c->seam_corners, c->seam_images, c->seam_masks);
+            report(gains_share);
             compensator->getMatGains(c->gains);
             for (const cv::Mat &g : c->gains) {
                 double high = 1;
@@ -509,8 +530,9 @@ extern "C" int32_t sc_compositor_prepare(sc_compositor *c, char *error, size_t e
                 case SC_SEAM_DP: finder = cv::makePtr<cd::DpSeamFinder>(cd::DpSeamFinder::COLOR_GRAD); break;
                 default: finder = cv::makePtr<cd::GraphCutSeamFinder>(cd::GraphCutSeamFinderBase::COST_COLOR_GRAD); break;
             }
-            find_seams(*c, images, finder);
+            find_seams(*c, images, finder, [&](double fraction) { report(gains_share + (1 - gains_share) * fraction); });
         }
+        report(1);
         c->seam_images.clear();
         check(*c);
         // The blender sums the weighted Laplacians of every photo in 16-bit integers. Each is at most the

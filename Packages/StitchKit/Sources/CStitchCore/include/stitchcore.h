@@ -165,6 +165,21 @@ int32_t sc_match_learned(sc_onnx_model *model, const float *keypoints, const flo
                          int32_t keypoint_count, int32_t descriptor_size, int32_t *partner, float *confidence,
                          char *error, size_t error_length);
 
+// MARK: - Progress
+
+/// Progress of a long call, and a way to stop it. `report` receives the share of the call done so far, in
+/// [0, 1], never lower than its previous value in the same call. A non-zero return stops the call: it returns 2,
+/// writes none of its outputs and makes no further call to `report`. `report` runs only on the thread that made
+/// the call, synchronously, never after the call returns: first right after the input checks, then between
+/// units of work (solver iterations, damping attempts, bundle-adjustment evaluations, cameras of a Jacobian).
+/// It must be quick, must not unwind (no C++ exception, no Swift error) and must not call this library.
+typedef int32_t (*sc_progress_fn)(void *context, double fraction);
+
+typedef struct {
+    sc_progress_fn report;
+    void *context;
+} sc_progress;
+
 // MARK: - Global alignment
 
 typedef enum {
@@ -205,9 +220,15 @@ typedef struct {
 /// and the focal length in `focals`. `wave`: -1 none, 0 horizontal, 1 vertical, 2 automatic.
 /// `pair_rms` (optional, `pair_count` entries) receives the RMS transfer error of each element of `pairs`, in
 /// the same order, and 0 for a pair without a finite correspondence. It is written only when sc_align returns 0.
+/// `progress` may be NULL: no reports, no stop, and OpenCV's own bundle adjusters. With it, the results are the
+/// same (bit for bit for the rotation; the planar models' sparse solver sums in a different order from run to run
+/// when it uses several threads). Returns 0 (aligned), 1 (failed, message in `error`) or 2 (stopped through
+/// `progress`); on 2,
+/// `error` holds "cancelled", `*result` is zero, and `transforms`, `focals` and `pair_rms` are untouched.
 int32_t sc_align(sc_align_model model, const sc_align_image *images, int32_t image_count,
                  const sc_align_pair *pairs, int32_t pair_count, int32_t anchor, int32_t wave, double *transforms,
-                 double *focals, double *pair_rms, sc_align_result *result, char *error, size_t error_length);
+                 double *focals, double *pair_rms, sc_align_result *result, const sc_progress *progress,
+                 char *error, size_t error_length);
 
 /// Worst corner stretch (max of s and 1/s, s = sqrt|det J|) of planar transforms re-anchored on `anchor`;
 /// infinity when a corner falls behind the plane. `sizes` holds width, height per photo.
@@ -286,9 +307,11 @@ void sc_compositor_image_size(const sc_compositor *compositor, int32_t index, in
 int32_t sc_compositor_add_seam_image(sc_compositor *compositor, int32_t index, const uint16_t *rgba, int32_t width,
                                      int32_t height, int32_t bytes_per_row, int32_t orientation, char *error,
                                      size_t error_length);
-/// Exposure gains and seams, after every seam image. Returns 0, 1 (error, also for a canvas larger than
-/// SC_MAX_PANORAMA_SIDE) or 2 (cancelled).
-int32_t sc_compositor_prepare(sc_compositor *compositor, char *error, size_t error_length);
+/// Exposure gains and seams, after every seam image. `progress` (may be NULL) receives the share done: the gains,
+/// then the seams pair by pair; a non-zero return has the effect of sc_compositor_cancel. Returns 0, 1 (error,
+/// also for a canvas larger than SC_MAX_PANORAMA_SIDE) or 2 (cancelled).
+int32_t sc_compositor_prepare(sc_compositor *compositor, const sc_progress *progress, char *error,
+                              size_t error_length);
 /// Every photo once after preparing, as for the seam images but at sc_compositor_image_size.
 int32_t sc_compositor_add_image(sc_compositor *compositor, int32_t index, const uint16_t *rgba, int32_t width,
                                 int32_t height, int32_t bytes_per_row, int32_t orientation, char *error,

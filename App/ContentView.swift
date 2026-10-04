@@ -18,6 +18,9 @@ struct ContentView: View {
             Group {
                 if session.images.isEmpty {
                     EmptyState(importing: $importing)
+                } else if session.report == nil && session.tab != .panorama && session.isRunning {
+                    // A first analysis: the large bar, until the graph has something to show.
+                    ProgressCard(fallback: String(localized: "Analysing…"))
                 } else if session.report == nil && session.tab != .panorama {
                     ContentUnavailableView {
                         Label("Ready", systemImage: "point.3.connected.trianglepath.dotted")
@@ -69,6 +72,7 @@ struct ContentView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 if session.isBusy {
                     Button("Stop", systemImage: "stop.fill") { session.cancel() }
+                        .disabled(session.isStopping)
                 } else {
                     Button("Analyze", systemImage: "point.3.connected.trianglepath.dotted") { session.analyze() }
                         .disabled(!session.canAnalyze)
@@ -137,8 +141,10 @@ private struct StatusBar: View {
         if session.isBusy || session.isExporting || (session.report != nil && !session.reportIsCurrent) {
             HStack(spacing: 10) {
                 if session.isBusy {
-                    ProgressView().controlSize(.small)
-                    Text(progressText)
+                    ProgressBar()
+                        .frame(width: 80)
+                    Text(session.isStopping ? String(localized: "Stopping…") : progressText)
+                        .monospacedDigit()
                 } else if session.isExporting {
                     ProgressView().controlSize(.small)
                     Text("Exporting…")

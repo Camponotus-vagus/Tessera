@@ -113,7 +113,7 @@ struct TesseraApp: App {
                     .disabled(!session.canStitch)
                 Button("Stop") { session.cancel() }
                     .keyboardShortcut(".")
-                    .disabled(!session.isBusy)
+                    .disabled(!session.isBusy || session.isStopping)
                 Divider()
                 Button("Graph View") { session.tab = .graph }
                     .keyboardShortcut("1")

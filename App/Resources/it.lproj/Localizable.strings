@@ -27,6 +27,7 @@
 "Geometric verification" = "Verifica geometrica";
 "Pairs between separate groups" = "Coppie tra gruppi separati";
 "Pairs the layout predicts" = "Coppie previste dalla disposizione";
+"Laying out the photos" = "Disposizione provvisoria delle foto";
 "RootSIFT only: RaCo + LightGlue did not run" = "Solo RootSIFT: RaCo + LightGlue non è stato eseguito";
 
 /* Sidebar */
@@ -143,6 +144,7 @@
 "These files could not be read and were not added: %@" = "Questi file non si leggono e non sono stati aggiunti: %@";
 "Turn on at least one matcher." = "Attiva almeno un matcher.";
 "Stop" = "Interrompi";
+"Stopping…" = "Interruzione in corso…";
 
 /* Panorama */
 "Ready" = "Pronto";

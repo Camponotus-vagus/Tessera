@@ -121,10 +121,11 @@ extension ProgressEvent {
         case "lightglue-extract": String(localized: "RaCo-ALIKED keypoints")
         case "affinity": String(localized: "Choosing pairs")
         case "sift-match": String(localized: "RootSIFT matching")
-        case "lightglue-match": String(localized: "LightGlue matching")
+        case "lightglue-match", "lightglue-early": String(localized: "LightGlue matching")
         case "verify": String(localized: "Geometric verification")
         case "bridge": String(localized: "Pairs between separate groups")
         case "overlap": String(localized: "Pairs the layout predicts")
+        case "layout": String(localized: "Laying out the photos")
         case "align": String(localized: "Aligning the photos")
         case "seams": String(localized: "Finding seams")
         case "exposure": String(localized: "Seams and exposure")
@@ -132,6 +133,7 @@ extension ProgressEvent {
         case "blend": String(localized: "Blending")
         default: stage
         }
+        if let fraction { return "\(name): \(fraction.formatted(.percent.precision(.fractionLength(0))))" }
         return total > 0 ? "\(name): \(completed)/\(total)" : name
     }
 }

@@ -27,8 +27,9 @@ struct AlignmentProblem: Sendable {
     var thresholds: [Double]
 
     /// Union of the verified matchers' inliers per pair, without duplicates, checked by one homography
-    /// refit and capped to `cap` points spread over the photo.
-    static func build(_ report: MatchReport, component: [Int], cap: Int = 300) -> AlignmentProblem {
+    /// refit and capped to `cap` points spread over the photo. Throws only when the task is cancelled.
+    static func build(_ report: MatchReport, component: [Int], cap: Int = 300, progress: WorkLeaf = .none) throws
+        -> AlignmentProblem {
         let images = component.compactMap { id in report.images.first { $0.id == id } }
         let index = Dictionary(uniqueKeysWithValues: images.enumerated().map { ($1.id, $0) })
         let configuration = report.configuration
@@ -42,7 +43,10 @@ struct AlignmentProblem: Sendable {
         }
 
         var pairs: [Pair] = []
-        for key in grouped.keys.sorted() {
+        let keys = grouped.keys.sorted()
+        for (done, key) in keys.enumerated() {
+            if done % 32 == 0 { try Task.checkCancellation() }
+            progress.report(Double(done) / Double(keys.count))
             let sources = grouped[key]!.sorted { $0.source.rawValue < $1.source.rawValue }
             var candidates: [(point: SIMD4<Float>, sigma: Float)] = []
             var perSource: [(source: FeatureSource, points: [SIMD4<Float>], sigma: Float, transform: [Double])] = []
@@ -298,10 +302,35 @@ struct Alignment: Sendable {
     var method: Int32
 }
 
+/// Steps of the alignment, for its progress plans.
+private enum AlignStep: Hashable, Sendable { case choose, trialHomographies, trial, leaveOut, drop, rechoose, leaveOutAfter }
+private enum TrialStep: Hashable, Sendable { case document, planar }
+private enum LeaveOutStep: Hashable, Sendable { case homographies, choose }
+private enum DropStep: Hashable, Sendable { case solve, choose }
+private enum OutcomeStep: Hashable, Sendable { case build, align }
+private enum ChooseStep: Hashable, Sendable {
+    case translation, similarity, affine, homographies, trial, trialRotation, rotation, fallback
+}
+
 enum Aligner {
-    /// Solves `model` once. Throws with the solver's message when it fails.
-    static func solve(_ model: GlobalModel, _ problem: AlignmentProblem, anchor: Int, straighten: Bool = true)
-        throws -> Alignment {
+    /// Solves `model` once. Throws with the solver's message when it fails, and CancellationError when the task
+    /// is cancelled before or during the solve: the native solver reads Task.isCancelled from its progress
+    /// callback, which it calls only on this thread, so the alignment must run synchronously inside the task that
+    /// Stop cancels or one of its child tasks (not on a dispatch queue or in Task.detached). The solve advances
+    /// `progress` by its expected cost; `monitored: false` runs the solver without a callback, as the equivalence
+    /// tests compare.
+    static func solve(_ model: GlobalModel, _ problem: AlignmentProblem, anchor: Int, straighten: Bool = true,
+                      progress: WorkSpan = .none, monitored: Bool = true) throws -> Alignment {
+        solveObserver?(model)
+        try Task.checkCancellation()
+        let size = AlignmentCost.size(problem), expected = AlignmentCost.solve(model, size)
+        let leaf = progress.leaf(expected)
+        let started = ContinuousClock.now
+        defer {
+            leaf.complete()
+            ProgressTrace.log("solve \(model) photos \(size.photos) pairs \(size.pairs) matches \(size.matches) " +
+                              "rotation \(size.rotationMatches) expected \(expected) took \((ContinuousClock.now - started) / .seconds(1))")
+        }
         let n = problem.images.count
         let native: sc_align_model = switch model {
         case .translation: SC_ALIGN_TRANSLATION
@@ -313,7 +342,7 @@ enum Aligner {
         // Rotation: SIFT points alone where a pair has enough, and fewer points per pair as the group grows,
         // because the bundle adjuster's Jacobian is dense.
         let useSIFT = model == .rotation
-        let cap = model == .rotation ? min(300, max(40, Int(1.4e6 / Double(max(1, n * problem.pairs.count))))) : Int.max
+        let cap = model == .rotation ? rotationCap(images: n, pairs: problem.pairs.count) : Int.max
         var flat: [Float] = [], sigmas: [Float] = []
         var ranges: [(offset: Int, count: Int)] = []
         for pair in problem.pairs {
@@ -336,20 +365,27 @@ enum Aligner {
         var pairRMS = [Double](repeating: 0, count: problem.pairs.count)
         var result = sc_align_result()
         var message = [CChar](repeating: 0, count: 512)
-        let status = flat.withUnsafeBufferPointer { points in
-            sigmas.withUnsafeBufferPointer { weights in
-                let pairs = zip(problem.pairs, ranges).map { pair, range in
-                    let h = pair.homography
-                    return sc_align_pair(a: Int32(pair.a), b: Int32(pair.b), count: Int32(range.count),
-                                         points: points.baseAddress! + 4 * range.offset,
-                                         sigma: weights.baseAddress! + range.offset,
-                                         homography: (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]))
+        let observer = NativeProgress(leaf)
+        let control = observer.control
+        let status = withExtendedLifetime(observer) {
+            withUnsafePointer(to: control) { control in
+                flat.withUnsafeBufferPointer { points in
+                    sigmas.withUnsafeBufferPointer { weights in
+                        let pairs = zip(problem.pairs, ranges).map { pair, range in
+                            let h = pair.homography
+                            return sc_align_pair(a: Int32(pair.a), b: Int32(pair.b), count: Int32(range.count),
+                                                 points: points.baseAddress! + 4 * range.offset,
+                                                 sigma: weights.baseAddress! + range.offset,
+                                                 homography: (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]))
+                        }
+                        return sc_align(native, images, Int32(n), pairs, Int32(pairs.count), Int32(anchor),
+                                        model == .rotation && straighten ? 2 : -1, &transforms, &focals, &pairRMS,
+                                        &result, monitored ? control : nil, &message, message.count)
+                    }
                 }
-                return sc_align(native, images, Int32(n), pairs, Int32(pairs.count), Int32(anchor),
-                                model == .rotation && straighten ? 2 : -1, &transforms, &focals, &pairRMS, &result,
-                                &message, message.count)
             }
         }
+        if status == 2 { throw CancellationError() }
         guard status == 0, result.ok != 0 else { throw StitchError.engine(errorText(message)) }
         // Errors are measured in the anchor's pixels, so a similarity or affine fit can lower them by
         // shrinking photos towards a point: on 511 drone photos most fell to a thousandth of their size.
@@ -365,6 +401,15 @@ enum Aligner {
                          focals: focals, rms: result.rms, pairRMS: pairRMS, method: result.iterations)
     }
 
+    /// For tests: called with the model of every solve as it starts, before its cancellation check.
+    @TaskLocal static var solveObserver: (@Sendable (GlobalModel) -> Void)?
+
+    /// Matches per pair the rotation uses: fewer as the group grows, because the bundle adjuster's Jacobian is
+    /// dense.
+    static func rotationCap(images: Int, pairs: Int) -> Int {
+        min(300, max(40, Int(1.4e6 / Double(max(1, images * pairs)))))
+    }
+
     /// Worst corner stretch of a planar solution seen from `anchor`'s plane.
     static func stretch(_ alignment: Alignment, _ problem: AlignmentProblem, anchor: Int) -> Double {
         let flat = alignment.transforms.flatMap { $0 }
@@ -373,11 +418,17 @@ enum Aligner {
     }
 
     /// Homographies onto the photo whose plane stretches the others least (min-max over corners).
-    static func homographies(_ problem: AlignmentProblem, anchor: Int) throws -> (Alignment, stretch: Double) {
-        var alignment = try solve(.homography, problem, anchor: anchor)
+    static func homographies(_ problem: AlignmentProblem, anchor: Int, progress: WorkSpan = .none) throws
+        -> (Alignment, stretch: Double) {
+        let solve = AlignmentCost.solve(.homography, AlignmentCost.size(problem))
+        var plan = WorkPlan(progress, [(0, solve), (1, solve)])
+        var alignment = try self.solve(.homography, problem, anchor: anchor, progress: plan.next(0))
         let ranked = problem.images.indices.map { ($0, stretch(alignment, problem, anchor: $0)) }
         if let best = ranked.min(by: { $0.1 < $1.1 }), best.0 != anchor, best.1.isFinite {
-            if let better = try? solve(.homography, problem, anchor: best.0) { alignment = better }
+            if let better = try? self.solve(.homography, problem, anchor: best.0, progress: plan.next(1)) {
+                alignment = better
+            }
+            try Task.checkCancellation()
         }
         return (alignment, stretch(alignment, problem, anchor: alignment.anchor))
     }
@@ -389,47 +440,75 @@ enum Aligner {
     /// The pairs it drops are given by photo id, with their error, and so are the photos it leaves out.
     /// `provisional` alignments, which only lay the photos out, throw `ProvisionalSkip` instead of solving
     /// the rotation for more than `rotationTrial.limit` photos. `automaticTrial` marks Automatic mode's
-    /// own Document trial, which may leave photos out as Automatic mode does.
+    /// own Document trial, which may leave photos out as Automatic mode does. The steps advance `progress`.
     static func align(_ problem: AlignmentProblem, mode: StitchMode, centre: Int, straighten: Bool,
-                      provisional: Bool = false, automaticTrial: Bool = false) throws
+                      provisional: Bool = false, automaticTrial: Bool = false, progress: WorkSpan = .none) throws
         -> (alignment: Alignment, problem: AlignmentProblem, notes: [String], dropped: [(a: Int, b: Int, off: Double)],
             misplaced: [Int]) {
         var problem = problem
         var centre = centre
         var modelNotes: [String] = []
+        let size = AlignmentCost.size(problem)
+        let chooseCost = AlignmentCost.choose(mode, size, provisional: provisional)
+        func tail(_ model: GlobalModel)
+            -> (trialHomographies: Double, trial: Double, leaveOut: Double, drop: Double, rechoose: Double, leaveOutAfter: Double) {
+            AlignmentCost.tail(mode, model: model, size, provisional: provisional, automaticTrial: automaticTrial)
+        }
+        let likely = tail(AlignmentCost.likelyModel(mode))
+        var plan = WorkPlan<AlignStep>(progress, [(.choose, chooseCost), (.trialHomographies, likely.trialHomographies),
+                                                  (.trial, likely.trial), (.leaveOut, likely.leaveOut),
+                                                  (.drop, likely.drop), (.rechoose, likely.rechoose),
+                                                  (.leaveOutAfter, likely.leaveOutAfter)])
         var alignment = try choose(problem, mode: mode, centre: centre, straighten: straighten, provisional: provisional,
-                                   notes: &modelNotes)
+                                   notes: &modelNotes, progress: plan.next(.choose))
+        let expected = tail(alignment.model)
+        plan.revise(.trialHomographies, expected.trialHomographies)
+        plan.revise(.trial, expected.trial)
+        plan.revise(.leaveOut, expected.leaveOut)
+        plan.revise(.drop, expected.drop)
+        plan.revise(.rechoose, expected.rechoose)
+        plan.revise(.leaveOutAfter, expected.leaveOutAfter)
         // Homographies that fit most pairs far better than the model chosen, but that a few false pairs or
         // misplaced photos stretch out of the running (median pair error 8.8 px against 79 px for the affine
         // on 511 drone photos): Document mode's own clean-up may rescue them. They are kept when they then
         // earn their perspective, or when they leave the planar fits four times behind and stretch no photo
         // more than twice the usual limit: a survey of uneven ground drifts into a gentle, even perspective
         // (13.8 px against 700 px, stretched 4.9 times at the far end).
-        if mode == .auto, alignment.model != .homography, alignment.model != .rotation,
-           let (document, _) = try? homographies(problem, anchor: centre),
-           median(document.pairRMS) < 0.5 * median(alignment.pairRMS) {
-            try Task.checkCancellation()
-            if let trial = try? align(problem, mode: .document, centre: centre, straighten: straighten,
-                                      provisional: provisional, automaticTrial: true),
-               trial.alignment.model == .homography,
-               let planar = [GlobalModel.affine, .similarity, .translation].compactMap({
-                   try? solve($0, trial.problem, anchor: trial.alignment.anchor)
-               }).min(by: { $0.rms < $1.rms }) {
-                let spread = stretch(trial.alignment, trial.problem, anchor: trial.alignment.anchor)
-                if earnsPerspective(documentRMS: trial.alignment.rms, stretch: spread, planarRMS: planar.rms)
-                    || (trial.alignment.rms < 0.25 * planar.rms && spread <= 2 * overstretch) {
-                    // Document mode's hint at Rotation mode does not apply to a set Automatic found flat.
-                    let hint = String(localized: "Some photos are stretched a lot on the reference plane: Rotation mode may suit them better")
-                    return (trial.alignment, trial.problem, trial.notes.filter { $0 != hint }, trial.dropped, trial.misplaced)
+        if mode == .auto, alignment.model != .homography, alignment.model != .rotation {
+            if let (document, _) = try? homographies(problem, anchor: centre, progress: plan.next(.trialHomographies)),
+               median(document.pairRMS) < 0.5 * median(alignment.pairRMS) {
+                try Task.checkCancellation()
+                // The trial usually ends the alignment: what follows it then never runs.
+                plan.scale(after: .trial, by: 0.3)
+                var trialPlan = WorkPlan<TrialStep>(plan.next(.trial), [
+                    (.document, AlignmentCost.align(.document, size, provisional: provisional, automaticTrial: true)),
+                    (.planar, AlignmentCost.planar(size)),
+                ])
+                if let trial = try? align(problem, mode: .document, centre: centre, straighten: straighten,
+                                          provisional: provisional, automaticTrial: true, progress: trialPlan.next(.document)),
+                   trial.alignment.model == .homography,
+                   let planar = [GlobalModel.affine, .similarity, .translation].compactMap({
+                       try? solve($0, trial.problem, anchor: trial.alignment.anchor,
+                                  progress: trialPlan.next(.planar, cost: AlignmentCost.solve($0, size)))
+                   }).min(by: { $0.rms < $1.rms }) {
+                    try Task.checkCancellation()
+                    let spread = stretch(trial.alignment, trial.problem, anchor: trial.alignment.anchor)
+                    if earnsPerspective(documentRMS: trial.alignment.rms, stretch: spread, planarRMS: planar.rms)
+                        || (trial.alignment.rms < 0.25 * planar.rms && spread <= 2 * overstretch) {
+                        // Document mode's hint at Rotation mode does not apply to a set Automatic found flat.
+                        let hint = String(localized: "Some photos are stretched a lot on the reference plane: Rotation mode may suit them better")
+                        return (trial.alignment, trial.problem, trial.notes.filter { $0 != hint }, trial.dropped, trial.misplaced)
+                    }
                 }
             }
+            try Task.checkCancellation()
         }
         // A new choice of model, or nil when it fails for any reason but cancellation.
-        func chooseAgain(_ problem: AlignmentProblem, centre: Int) throws -> (Alignment, [String])? {
+        func chooseAgain(_ problem: AlignmentProblem, centre: Int, progress: WorkSpan) throws -> (Alignment, [String])? {
             var notes: [String] = []
             do {
                 return (try choose(problem, mode: mode, centre: centre, straighten: straighten, provisional: provisional,
-                                   notes: &notes), notes)
+                                   notes: &notes, progress: progress), notes)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -444,11 +523,14 @@ enum Aligner {
         // by hand, where the photos stay and the note suggests Rotation mode.
         var misplaced: [Int] = []
         let budget = max(1, problem.images.count / 20)
-        func leaveOutMisplaced() throws -> Bool {
+        func leaveOutMisplaced(_ progress: WorkSpan) throws -> Bool {
             // In a small set one stretched photo is as likely the outer photo of a turning camera.
             guard mode == .auto || automaticTrial, alignment.model != .rotation, budget >= 2 else { return false }
             try Task.checkCancellation()
-            let stretched = Set(overstretched(problem, anchor: centre))
+            var steps = WorkPlan<LeaveOutStep>(progress, [(.homographies, AlignmentCost.homographies(size)),
+                                                           (.choose, chooseCost)])
+            let stretched = Set(overstretched(problem, anchor: centre, progress: steps.next(.homographies)))
+            try Task.checkCancellation()
             guard !stretched.isEmpty, misplaced.count + stretched.count <= budget else { return false }
             let remaining = problem.subset(problem.images.indices.filter { !stretched.contains($0) })
             let groups = PairProposal.components(Array(remaining.images.indices),
@@ -461,7 +543,8 @@ enum Aligner {
             let centreID = problem.images[centre].id
             let newCentre = reduced.images.firstIndex { $0.id == centreID } ?? 0
             // Kept only when the homographies win without them: a planar model placed them as well as the rest.
-            guard let (chosen, notes) = try chooseAgain(reduced, centre: newCentre), chosen.model == .homography else {
+            guard let (chosen, notes) = try chooseAgain(reduced, centre: newCentre, progress: steps.next(.choose)),
+                  chosen.model == .homography else {
                 return false
             }
             let kept = Set(reduced.images.map(\.id))
@@ -472,10 +555,11 @@ enum Aligner {
             modelNotes = notes
             return true
         }
-        _ = try leaveOutMisplaced()
+        _ = try leaveOutMisplaced(plan.next(.leaveOut))
 
         var dropped: [(a: Int, b: Int, off: Double)] = []
         var stale = false
+        var rounds = 0
         let limit = max(2, (problem.pairs.count - (problem.images.count - 1)) / 4)
         while dropped.count < limit {
             try Task.checkCancellation()
@@ -495,14 +579,22 @@ enum Aligner {
             let gone = Set(removing)
             var reduced = problem
             reduced.pairs = problem.pairs.indices.filter { !gone.contains($0) }.map { problem.pairs[$0] }
+            // One round: a solve, and a new choice of model now and then. The step keeps as many rounds in reserve
+            // as have run, so that each round takes a share of the bar that falls off slowly as they go on.
+            let round = AlignmentCost.solve(alignment.model, size) + 0.2 * chooseCost
+            rounds += 1
+            var steps = WorkPlan<DropStep>(plan.next(.drop, cost: round, floor: round * Double(rounds)), [
+                (.solve, AlignmentCost.solve(alignment.model, size)), (.choose, 0.2 * chooseCost),
+            ])
             // Without outliers the same model fits better. When it fits worse, it leaned on them (a rotation
             // a false pair made look plausible, say): choose the model again.
             let next: Alignment
-            if let resolved = try? solve(alignment.model, reduced, anchor: alignment.anchor, straighten: straighten),
+            if let resolved = try? solve(alignment.model, reduced, anchor: alignment.anchor, straighten: straighten,
+                                         progress: steps.next(.solve)),
                resolved.rms <= alignment.rms {
                 next = resolved
                 stale = true
-            } else if let (chosen, notes) = try chooseAgain(reduced, centre: centre) {
+            } else if let (chosen, notes) = try chooseAgain(reduced, centre: centre, progress: steps.next(.choose)) {
                 next = chosen
                 modelNotes = notes
                 stale = false
@@ -515,15 +607,18 @@ enum Aligner {
             problem = reduced
             alignment = next
         }
+        try Task.checkCancellation()
         // The model was chosen with the pairs now left out.
-        if stale, let (chosen, notes) = try chooseAgain(problem, centre: centre) {
+        if stale, let (chosen, notes) = try chooseAgain(problem, centre: centre, progress: plan.next(.rechoose)) {
             alignment = chosen
             modelNotes = notes
         }
         // Leaving photos out can bring others over the limit; a few more rounds, within the same budget.
+        let leaveOutRound = AlignmentCost.homographies(size) + 0.1 * chooseCost
         for _ in 0..<3 {
-            guard try leaveOutMisplaced() else { break }
+            guard try leaveOutMisplaced(plan.next(.leaveOutAfter, cost: leaveOutRound)) else { break }
         }
+        try Task.checkCancellation()
         // Each pair was verified to within its own inlier threshold: a global fit looser than that has not joined them.
         if !alignment.pairRMS.isEmpty {
             let ratios = zip(alignment.pairRMS, problem.pairs).map { $0 / problem.thresholds[$1.b] }
@@ -542,8 +637,8 @@ enum Aligner {
     static let overstretch = 4.0
 
     /// Photos that the homographies onto `anchor`'s plane stretch more than `overstretch` times at a corner.
-    static func overstretched(_ problem: AlignmentProblem, anchor: Int) -> [Int] {
-        guard let (fit, _) = try? homographies(problem, anchor: anchor) else { return [] }
+    static func overstretched(_ problem: AlignmentProblem, anchor: Int, progress: WorkSpan = .none) -> [Int] {
+        guard let (fit, _) = try? homographies(problem, anchor: anchor, progress: progress) else { return [] }
         let reference = PlaneGeometry.matrix(fit.transforms[fit.anchor]).inverse
         return problem.images.indices.filter { i in
             let m = reference * PlaneGeometry.matrix(fit.transforms[i])
@@ -571,28 +666,50 @@ enum Aligner {
     struct ProvisionalSkip: Error {}
 
     private static func choose(_ problem: AlignmentProblem, mode: StitchMode, centre: Int, straighten: Bool,
-                               provisional: Bool = false, notes: inout [String]) throws -> Alignment {
+                               provisional: Bool = false, notes: inout [String], progress: WorkSpan = .none) throws
+        -> Alignment {
         func simplest(_ fits: [Alignment]) -> Alignment? {
             guard let best = fits.map(\.rms).min() else { return nil }
             let tolerance = 1.25 * best + 0.5
             return fits.first { $0.rms <= tolerance }
         }
+        let size = AlignmentCost.size(problem)
+        let large = problem.images.count > Self.rotationTrial.limit
+        let trialSize = size.scaled(to: Self.rotationTrial.size)
+        var plan = WorkPlan<ChooseStep>(progress, [
+            (.translation, mode == .plane || mode == .auto ? AlignmentCost.solve(.translation, size) : 0),
+            (.similarity, mode == .plane || mode == .auto ? AlignmentCost.solve(.similarity, size) : 0),
+            (.affine, mode == .plane || mode == .auto ? AlignmentCost.solve(.affine, size) : 0),
+            (.homographies, mode == .rotation ? 0 : AlignmentCost.homographies(size)),
+            (.trial, mode == .auto && large ? AlignmentCost.choose(.auto, trialSize, provisional: provisional) : 0),
+            (.trialRotation, mode == .auto && large
+                ? 0.5 * (AlignmentCost.rotation(trialSize) + AlignmentCost.solve(.affine, trialSize)) : 0),
+            (.rotation, mode == .rotation ? AlignmentCost.rotation(size)
+                : mode == .auto ? (large ? (provisional ? 0 : 0.1 * AlignmentCost.rotation(size)) : AlignmentCost.rotation(size)) : 0),
+            (.fallback, mode == .rotation ? 0.2 * AlignmentCost.homographies(size) : 0),
+        ])
+        func planarStep(_ model: GlobalModel) -> ChooseStep {
+            model == .translation ? .translation : model == .similarity ? .similarity : .affine
+        }
         switch mode {
         case .plane:
-            let fits = [GlobalModel.translation, .similarity, .affine].compactMap { try? solve($0, problem, anchor: centre) }
+            let fits = [GlobalModel.translation, .similarity, .affine].compactMap {
+                try? solve($0, problem, anchor: centre, progress: plan.next(planarStep($0)))
+            }
             try Task.checkCancellation()
             guard let chosen = simplest(fits) else { throw StitchError.engine(String(localized: "The tiles could not be aligned")) }
             // Against the best planar fit: the simplest one may leave an error that an affine fit removes.
-            if let (document, stretch) = try? homographies(problem, anchor: centre),
+            if let (document, stretch) = try? homographies(problem, anchor: centre, progress: plan.next(.homographies)),
                let best = fits.min(by: { $0.rms < $1.rms }),
                earnsPerspective(documentRMS: document.rms, stretch: stretch, planarRMS: best.rms),
                best.rms - document.rms > 1 {
                 notes.append(String(format: String(localized: "The photos show perspective: Document mode would align them to %.1f px instead of %.1f px"),
                                     locale: .current, document.rms, chosen.rms))
             }
+            try Task.checkCancellation()
             return chosen
         case .document:
-            let (document, stretch) = try homographies(problem, anchor: centre)
+            let (document, stretch) = try homographies(problem, anchor: centre, progress: plan.next(.homographies))
             guard stretch.isFinite else {
                 throw StitchError.engine(String(localized: "The photos do not lie on one plane: try Rotation mode"))
             }
@@ -603,16 +720,22 @@ enum Aligner {
         case .rotation:
             if provisional, problem.images.count > Self.rotationTrial.limit { throw ProvisionalSkip() }
             do {
-                return try solve(.rotation, problem, anchor: centre, straighten: straighten)
+                return try solve(.rotation, problem, anchor: centre, straighten: straighten, progress: plan.next(.rotation))
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
-                guard let (document, stretch) = try? homographies(problem, anchor: centre), stretch < overstretch else {
+                guard let (document, stretch) = try? homographies(problem, anchor: centre, progress: plan.next(.fallback)),
+                      stretch < overstretch else {
+                    try Task.checkCancellation()
                     throw error
                 }
                 notes.append(String(localized: "The photos do not fit a rotating camera; they were joined as a flat document"))
                 return document
             }
         case .auto:
-            let planar = [GlobalModel.translation, .similarity, .affine].compactMap { try? solve($0, problem, anchor: centre) }
+            let planar = [GlobalModel.translation, .similarity, .affine].compactMap {
+                try? solve($0, problem, anchor: centre, progress: plan.next(planarStep($0)))
+            }
             try Task.checkCancellation()
             // The tolerance is at least half a pixel and at most 1.25 times the best planar fit plus half a pixel:
             // these choices do not need the homographies or the rotation, the slowest of the fits.
@@ -621,7 +744,7 @@ enum Aligner {
                planar.first(where: { $0.model == .translation }).map({ $0.rms > 1.25 * lowest + 0.5 }) ?? true {
                 return s
             }
-            let document = try? homographies(problem, anchor: centre)
+            let document = try? homographies(problem, anchor: centre, progress: plan.next(.homographies))
             try Task.checkCancellation()
             let documentStretched = document.map { !$0.stretch.isFinite || $0.stretch > overstretch } ?? true
             // The rotation's bundle adjustment is dense: with hundreds of photos it runs for hours. Above
@@ -630,22 +753,29 @@ enum Aligner {
             // it beats the affine there: a wide turn stretches the whole set's homographies, not the
             // centre's, while a drone survey's photos do not fit a rotation even nearby.
             let rotation: Alignment?
-            if problem.images.count > Self.rotationTrial.limit,
-               let trial = problem.neighbourhood(of: centre, count: Self.rotationTrial.size) {
+            if large, let trial = problem.neighbourhood(of: centre, count: Self.rotationTrial.size) {
+                let local = AlignmentCost.size(trial.problem)
+                plan.revise(.trial, AlignmentCost.choose(.auto, local, provisional: provisional))
                 var ignored: [String] = []
-                let model = try? choose(trial.problem, mode: .auto, centre: trial.centre, straighten: straighten, notes: &ignored)
+                let model = try? choose(trial.problem, mode: .auto, centre: trial.centre, straighten: straighten,
+                                        notes: &ignored, progress: plan.next(.trial))
                 try Task.checkCancellation()
                 var wins = model?.model == .rotation
-                if !wins, documentStretched,
-                   let local = try? solve(.rotation, trial.problem, anchor: trial.centre, straighten: straighten),
-                   let affine = try? solve(.affine, trial.problem, anchor: trial.centre) {
-                    wins = local.rms < affine.rms
+                if !wins, documentStretched {
+                    plan.revise(.trialRotation, AlignmentCost.rotation(local) + AlignmentCost.solve(.affine, local))
+                    if let turn = try? solve(.rotation, trial.problem, anchor: trial.centre, straighten: straighten,
+                                             progress: plan.next(.trialRotation, cost: AlignmentCost.rotation(local))),
+                       let affine = try? solve(.affine, trial.problem, anchor: trial.centre, progress: plan.next(.trialRotation)) {
+                        wins = turn.rms < affine.rms
+                    }
                 }
                 try Task.checkCancellation()
                 if wins, provisional { throw ProvisionalSkip() }
-                rotation = wins ? try? solve(.rotation, problem, anchor: centre, straighten: straighten) : nil
+                plan.revise(.rotation, wins ? AlignmentCost.rotation(size) : 0)
+                rotation = wins ? try? solve(.rotation, problem, anchor: centre, straighten: straighten,
+                                             progress: plan.next(.rotation)) : nil
             } else {
-                rotation = try? solve(.rotation, problem, anchor: centre, straighten: straighten)
+                rotation = try? solve(.rotation, problem, anchor: centre, straighten: straighten, progress: plan.next(.rotation))
             }
             try Task.checkCancellation()
             let all = planar.map(\.rms) + [document?.0.rms, rotation?.rms].compactMap { $0 }
@@ -727,8 +857,12 @@ public struct AlignmentSummary: Sendable {
 
 extension StitchEngine {
     /// Aligns the main group of `report` without compositing.
-    public nonisolated func align(_ report: MatchReport, straighten: Bool = true) throws -> AlignmentSummary {
-        let outcome = try Self.alignment(for: report, straighten: straighten)
+    /// `progress` receives "align" events with the share of the alignment done.
+    public nonisolated func align(_ report: MatchReport, straighten: Bool = true,
+                                  progress: (@Sendable (ProgressEvent) -> Void)? = nil) throws -> AlignmentSummary {
+        let meter = WorkMeter(stage: "align", emit: progress)
+        let outcome = try Self.alignment(for: report, straighten: straighten, progress: meter.begin())
+        meter.finish()
         let problem = outcome.problem, alignment = outcome.alignment
         let names = Dictionary(uniqueKeysWithValues: report.images.map { ($0.id, $0.name) })
         return AlignmentSummary(
@@ -745,11 +879,20 @@ extension StitchEngine {
 
     /// Aligns the main group of `report`, without the pairs whose loops do not close and the photos they
     /// alone joined.
-    static func alignment(for report: MatchReport, straighten: Bool, provisional: Bool = false) throws -> AlignmentOutcome {
+    static func alignment(for report: MatchReport, straighten: Bool, provisional: Bool = false,
+                          progress: WorkSpan = .none) throws -> AlignmentOutcome {
         guard let component = report.graph.components.first, component.count >= 2 else {
             throw StitchError.nothingToStitch
         }
-        let full = AlignmentProblem.build(report, component: component)
+        let mode = report.configuration.mode
+        let estimate = AlignmentCost.size(report, component: component)
+        var plan = WorkPlan<OutcomeStep>(progress, [
+            (.build, AlignmentCost.build * Double(estimate.pairs)),
+            (.align, AlignmentCost.align(mode, estimate, provisional: provisional)),
+        ])
+        let buildLeaf = plan.next(.build).leaf(AlignmentCost.build * Double(estimate.pairs))
+        let full = try AlignmentProblem.build(report, component: component, progress: buildLeaf)
+        buildLeaf.complete()
         guard full.pairs.count >= full.images.count - 1, full.isConnected() else {
             throw StitchError.nothingToStitch
         }
@@ -765,9 +908,10 @@ extension StitchEngine {
             let centreID = GraphLayout.centre(of: problem.images.map(\.id), edges: edges)
             return problem.images.firstIndex { $0.id == centreID } ?? 0
         }
-        let mode = report.configuration.mode
+        plan.revise(.align, AlignmentCost.align(mode, AlignmentCost.size(problem), provisional: provisional))
         let result = try Aligner.align(problem, mode: mode, centre: centre(of: problem), straighten: straighten,
-                                       provisional: provisional)
+                                       provisional: provisional, progress: plan.next(.align))
+        try Task.checkCancellation()
         let leftOutPairs = broken.map { LeftOutPair(a: full.images[full.pairs[$0].a].id, b: full.images[full.pairs[$0].b].id,
                                                     reason: .brokenLoops) }
             + result.dropped.map { LeftOutPair(a: $0.a, b: $0.b, reason: .offBy($0.off)) }

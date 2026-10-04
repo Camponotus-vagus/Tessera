@@ -25,7 +25,10 @@
 #include <opencv2/stitching/detail/motion_estimators.hpp>
 
 #include "common.hpp"
+#include "interruptible_adjuster.hpp"
+#include "progress.hpp"
 
+using stitchcore::Monitor;
 using stitchcore::write_error;
 
 namespace {
@@ -294,7 +297,7 @@ cv::Matx33d linear_transform(sc_align_model model, const double *theta, const cv
 }
 
 bool solve_linear(sc_align_model model, const std::vector<cv::Size> &sizes, const std::vector<Pair> &pairs,
-                  int anchor, std::vector<cv::Matx33d> &G, int &iterations) {
+                  int anchor, std::vector<cv::Matx33d> &G, int &iterations, Monitor &monitor) {
     const int n = static_cast<int>(sizes.size()), d = dof(model);
     std::vector<int> slot(n, -1);
     int unknowns = 0;
@@ -328,6 +331,7 @@ bool solve_linear(sc_align_model model, const std::vector<cv::Size> &sizes, cons
     for (const Pair &pair : pairs) links.emplace_back(block(pair.a), block(pair.b));
     BlockNormalEquations system(unknowns, d, links);
     for (iterations = 0; iterations < 8; ++iterations) {
+        monitor.check(iterations / 8.0);
         system.clear();
         for (const Pair &pair : pairs) {
             PairBlocks blocks(system, block(pair.a), block(pair.b));
@@ -400,8 +404,12 @@ void homography_rows(const cv::Matx33d &H, const cv::Vec2d &p, double J[2][8], c
 
 cv::Matx33d from_parameters(const double *h) { return cv::Matx33d(h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1); }
 
+// Share of the homography solve done at iteration k: linear in k when it runs to the cap, quicker at first
+// because most solves converge long before it.
+double homography_fraction(double k) { return std::max(k / 60.0, 1.0 - std::exp(-k / 12.0)); }
+
 bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pair> &pairs, int anchor,
-                        std::vector<cv::Matx33d> &G, int &iterations) {
+                        std::vector<cv::Matx33d> &G, int &iterations, Monitor &monitor) {
     const int n = static_cast<int>(sizes.size());
     std::vector<cv::Matx33d> N(n);
     for (int i = 0; i < n; ++i) N[i] = normaliser(sizes[i]);
@@ -433,6 +441,7 @@ bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pa
         placed[image] = true;
     }
     if (!std::all_of(placed.begin(), placed.end(), [](bool v) { return v; })) return false;
+    monitor.check(0);
 
     std::vector<int> slot(n, -1);
     int unknowns = 0;
@@ -495,6 +504,7 @@ bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pa
     for (const Pair &pair : pairs) links.emplace_back(block(pair.a), block(pair.b));
     BlockNormalEquations system(unknowns, 8, links);
     for (iterations = 0; iterations < 60 && !converged; ++iterations) {
+        monitor.check(homography_fraction(iterations));
         // Huber weights on the current residuals, scale factors frozen for this step; the right-hand side
         // holds -g, the descent direction.
         weights.clear();
@@ -528,6 +538,7 @@ bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pa
         const double before = energy(&weights);
         bool improved = false;
         for (int attempt = 0; attempt < 10 && !improved; ++attempt) {
+            monitor.check(homography_fraction(iterations));
             std::vector<double> step;
             if (!system.solve(step, lambda)) {
                 lambda *= 10;
@@ -680,14 +691,20 @@ std::vector<Pair> trimmed(int n, const std::vector<Pair> &pairs, const std::vect
 }
 
 bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair> &pairs, int wave,
-                    std::vector<cv::detail::CameraParams> &cameras, int &method, std::string &problem) {
+                    std::vector<cv::detail::CameraParams> &cameras, int &method, std::string &problem,
+                    Monitor &monitor) {
     std::vector<cv::Size> sizes(n);
     for (int i = 0; i < n; ++i) sizes[i] = cv::Size(images[i].width, images[i].height);
 
+    // Shares of the call: setting up 0-0.03, the ray adjustment 0.03-0.60, the fixed-focal fallback or the
+    // refit 0.60-0.97.
+    monitor.range(0, 0.03);
+    monitor.check(0);
     std::vector<cv::detail::ImageFeatures> features;
     std::vector<cv::detail::MatchesInfo> matches;
     std::vector<double> homography_focals;
     detail_problem(sizes, pairs, features, matches, homography_focals);
+    monitor.check(0.5);
 
     // Focal prior: EXIF for every photo, else the homographies, else 72 degrees across the long side.
     std::vector<double> priors(n);
@@ -719,6 +736,7 @@ bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair>
         camera.R.convertTo(r, CV_32F);
         camera.R = r;
     }
+    monitor.check(1);
     const std::vector<cv::detail::CameraParams> initial = cameras;
 
     auto plausible = [&](const std::vector<cv::detail::CameraParams> &result) {
@@ -735,18 +753,27 @@ bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair>
     };
 
     // Method 0 refines focal lengths and rotations, method 1 only the rotations, the focal length staying at
-    // the prior; both for at most `iterations`.
+    // the prior; both for at most `iterations`, over the share [from, to] of the call. With a monitor the
+    // adjusters report and stop through it; their results are the same.
     auto adjust = [&](int kind, const std::vector<cv::detail::ImageFeatures> &f,
                       const std::vector<cv::detail::MatchesInfo> &m, std::vector<cv::detail::CameraParams> &c,
-                      int iterations = 200) {
+                      double from, double to, int iterations = 200) {
+        monitor.range(from, to);
+        monitor.check(0);
         cv::Ptr<cv::detail::BundleAdjusterBase> adjuster;
         if (kind == 0) {
-            adjuster = cv::makePtr<cv::detail::BundleAdjusterRay>();
+            adjuster = monitor.active()
+                           ? cv::Ptr<cv::detail::BundleAdjusterBase>(
+                                 new stitchcore::Interruptible<cv::detail::BundleAdjusterRay>(monitor))
+                           : cv::Ptr<cv::detail::BundleAdjusterBase>(cv::makePtr<cv::detail::BundleAdjusterRay>());
             adjuster->setTermCriteria(
                 cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, iterations, 1e-8));
         } else {
             // The adjuster's default allows 1000 iterations, each costing minutes with hundreds of photos.
-            adjuster = cv::makePtr<cv::detail::BundleAdjusterReproj>();
+            adjuster = monitor.active()
+                           ? cv::Ptr<cv::detail::BundleAdjusterBase>(
+                                 new stitchcore::Interruptible<cv::detail::BundleAdjusterReproj>(monitor))
+                           : cv::Ptr<cv::detail::BundleAdjusterBase>(cv::makePtr<cv::detail::BundleAdjusterReproj>());
             adjuster->setRefinementMask(cv::Mat::zeros(3, 3, CV_8U));
             adjuster->setTermCriteria(
                 cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, iterations, DBL_EPSILON));
@@ -759,11 +786,11 @@ bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair>
         }
     };
     method = 0;
-    bool ok = adjust(0, features, matches, cameras);
+    bool ok = adjust(0, features, matches, cameras, 0.03, 0.60);
     if (!ok) {
         method = 1;
         cameras = initial;
-        ok = adjust(1, features, matches, cameras);
+        ok = adjust(1, features, matches, cameras, 0.60, 0.97);
     }
     if (!ok) {
         problem = "the camera focal length does not fit the matches (not a rotating camera?)";
@@ -773,12 +800,14 @@ bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair>
     // whole panorama: refit once from its result without the matches far off it. Not with the focal length
     // fixed at the prior, where the errors measure the wrong focal length more than anything that moved.
     if (method == 0) {
+        monitor.range(0.60, 0.97);
+        monitor.check(0);
         try {
             const std::vector<Pair> kept = trimmed(n, pairs, cameras);
             if (!kept.empty()) {
                 detail_problem(sizes, kept, features, matches, homography_focals);
                 std::vector<cv::detail::CameraParams> refit = cameras;
-                if (adjust(0, features, matches, refit, 20)) {
+                if (adjust(0, features, matches, refit, 0.60, 0.97, 20)) {
                     // The adjuster fixes the photo at the centre of its spanning tree, which the trimmed
                     // matches can move: keep the first result's reference photo where it was.
                     int reference = 0;
@@ -840,13 +869,14 @@ bool solve_rotation(const sc_align_image *images, int n, const std::vector<Pair>
 extern "C" int32_t sc_align(sc_align_model model, const sc_align_image *images, int32_t image_count,
                             const sc_align_pair *pairs, int32_t pair_count, int32_t anchor, int32_t wave,
                             double *transforms, double *focals, double *pair_rms, sc_align_result *result,
-                            char *error, size_t error_length) {
+                            const sc_progress *progress, char *error, size_t error_length) {
     if (result) *result = sc_align_result{};
     if (images == nullptr || transforms == nullptr || result == nullptr || image_count < 2 || pair_count < 1 ||
         pairs == nullptr || anchor < 0 || anchor >= image_count || (model == SC_ALIGN_ROTATION && focals == nullptr)) {
         write_error(error, error_length, "invalid alignment input");
         return 1;
     }
+    Monitor monitor(progress);
     try {
         std::vector<cv::Size> sizes(image_count);
         for (int i = 0; i < image_count; ++i) {
@@ -885,6 +915,7 @@ extern "C" int32_t sc_align(sc_align_model model, const sc_align_image *images, 
             write_error(error, error_length, "the pairs do not connect every photo");
             return 1;
         }
+        monitor.check(0);
 
         std::vector<cv::Matx33d> G;
         int iterations = 0;
@@ -892,7 +923,7 @@ extern "C" int32_t sc_align(sc_align_model model, const sc_align_image *images, 
             std::vector<cv::detail::CameraParams> cameras;
             int method = 0;
             std::string problem;
-            if (!solve_rotation(images, image_count, list, wave, cameras, method, problem)) {
+            if (!solve_rotation(images, image_count, list, wave, cameras, method, problem, monitor)) {
                 write_error(error, error_length, problem);
                 return 1;
             }
@@ -924,8 +955,8 @@ extern "C" int32_t sc_align(sc_align_model model, const sc_align_image *images, 
             return 0;
         }
 
-        bool solved = model == SC_ALIGN_HOMOGRAPHY ? solve_homographies(sizes, list, anchor, G, iterations)
-                                                   : solve_linear(model, sizes, list, anchor, G, iterations);
+        bool solved = model == SC_ALIGN_HOMOGRAPHY ? solve_homographies(sizes, list, anchor, G, iterations, monitor)
+                                                   : solve_linear(model, sizes, list, anchor, G, iterations, monitor);
         if (!solved) {
             write_error(error, error_length, "the alignment did not converge");
             return 1;
@@ -938,8 +969,14 @@ extern "C" int32_t sc_align(sc_align_model model, const sc_align_image *images, 
         result->rms = rms;
         result->iterations = iterations;
         return 0;
+    } catch (const stitchcore::Cancelled &) {
+        write_error(error, error_length, "cancelled");
+        return 2;
     } catch (const std::exception &e) {
         write_error(error, error_length, e.what());
+        return 1;
+    } catch (...) {
+        write_error(error, error_length, "unexpected failure in the alignment");
         return 1;
     }
 }

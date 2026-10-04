@@ -102,7 +102,7 @@ struct CompositorTests {
             }
             if status != 0 { return (nil, errorText(message)) }
         }
-        if sc_compositor_prepare(c, &message, message.count) != 0 { return (nil, errorText(message)) }
+        if sc_compositor_prepare(c, nil, &message, message.count) != 0 { return (nil, errorText(message)) }
         for (index, photo) in photos.enumerated() {
             var w: Int32 = 0, h: Int32 = 0
             sc_compositor_image_size(c, Int32(index), &w, &h)
@@ -162,6 +162,55 @@ struct CompositorTests {
         #expect(wrapped == 0, "\(wrapped) pixels off by more than half the range")
     }
 
+    /// Counts sc_compositor_prepare's progress reports and asks for a stop at report `stopAt`.
+    private final class Reports {
+        var fractions: [Double] = []
+        let stopAt: Int
+        init(stopAt: Int) { self.stopAt = stopAt }
+    }
+
+    @Test("Preparing reports the exposure and then the seams, and stops when asked")
+    func prepareProgress() throws {
+        let photos = (0..<4).map { (k: Int) -> Photo in
+            Photo(width: 1200, height: 900, dx: Double(k % 2) * 800, dy: Double(k / 2) * 620)
+        }
+        var options = Self.options(blend: SC_BLEND_MULTIBAND, seam: SC_SEAM_GRAPHCUT)
+        options.exposure = SC_EXPOSURE_CHANNELS
+        func prepare(stopAt: Int) throws -> (status: Int32, fractions: [Double]) {
+            var message = [CChar](repeating: 0, count: 512)
+            let composeImages = Self.images(photos)
+            let c = try #require(composeImages.withUnsafeBufferPointer {
+                sc_compositor_create($0.baseAddress, Int32($0.count), &options, &message, message.count)
+            })
+            defer { sc_compositor_free(c) }
+            for (index, photo) in photos.enumerated() {
+                var w: Int32 = 0, h: Int32 = 0
+                sc_compositor_seam_size(c, Int32(index), &w, &h)
+                let data = Self.pixels(photo, size: (Int(w), Int(h)), scene: Self.stars)
+                _ = data.withUnsafeBufferPointer {
+                    sc_compositor_add_seam_image(c, Int32(index), $0.baseAddress, w, h, w * 8, 1, &message, message.count)
+                }
+            }
+            let reports = Reports(stopAt: stopAt)
+            let control = sc_progress(report: { context, fraction in
+                let reports = Unmanaged<Reports>.fromOpaque(context!).takeUnretainedValue()
+                reports.fractions.append(fraction)
+                return reports.fractions.count >= reports.stopAt ? 1 : 0
+            }, context: Unmanaged.passUnretained(reports).toOpaque())
+            let status = withExtendedLifetime(reports) {
+                withUnsafePointer(to: control) { sc_compositor_prepare(c, $0, &message, message.count) }
+            }
+            return (status, reports.fractions)
+        }
+        // The exposure, then one report before each overlapping pair of the four tiles (all six overlap), then 1.
+        let whole = try prepare(stopAt: .max)
+        #expect(whole.status == 0)
+        #expect(whole.fractions.first == 0 && whole.fractions.last == 1 && whole.fractions.count >= 8, "\(whole.fractions)")
+        #expect(zip(whole.fractions, whole.fractions.dropFirst()).allSatisfy { $0 <= $1 }, "\(whole.fractions)")
+        let stopped = try prepare(stopAt: 3)
+        #expect(stopped.status == 2 && stopped.fractions.count == 3, "\(stopped)")
+    }
+
     @Test("A second finish is refused instead of reusing the released blender")
     func finishOnce() throws {
         var message = [CChar](repeating: 0, count: 512)
@@ -173,7 +222,7 @@ struct CompositorTests {
         })
         defer { sc_compositor_free(c) }
         for pass in 0..<2 {
-            if pass == 1 { #expect(sc_compositor_prepare(c, &message, message.count) == 0) }
+            if pass == 1 { #expect(sc_compositor_prepare(c, nil, &message, message.count) == 0) }
             for (index, photo) in photos.enumerated() {
                 var w: Int32 = 0, h: Int32 = 0
                 if pass == 0 { sc_compositor_seam_size(c, Int32(index), &w, &h) } else { sc_compositor_image_size(c, Int32(index), &w, &h) }
@@ -239,7 +288,7 @@ struct CompositorTests {
             }
             #expect(status == 0)
         }
-        #expect(sc_compositor_prepare(c, &message, message.count) == 1)
+        #expect(sc_compositor_prepare(c, nil, &message, message.count) == 1)
         #expect(errorText(message).contains("per side"), "\(errorText(message))")
     }
 

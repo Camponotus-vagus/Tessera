@@ -40,7 +40,7 @@ struct PanoramaView: View {
                     placeholder
                 }
                 if session.isStitching {
-                    StitchingCard()
+                    ProgressCard(fallback: String(localized: "Stitching…"))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -106,19 +106,36 @@ private struct StaleBanner: View {
     }
 }
 
-private struct StitchingCard: View {
+/// A linear bar with the share of the current stage done, indeterminate while it is unknown or the work stops.
+struct ProgressBar: View {
     @Environment(DiagnosticSession.self) private var session
+
+    var body: some View {
+        // Two views, not one with an optional value: AppKit's indicator keeps its indeterminate animation running
+        // when the same view gets a value.
+        if let fraction = session.isStopping ? nil : session.displayFraction {
+            ProgressView(value: fraction).progressViewStyle(.linear)
+        } else {
+            ProgressView().progressViewStyle(.linear)
+        }
+    }
+}
+
+/// The current stage with its bar, which runs indeterminate while the share done is unknown, and a Stop button.
+struct ProgressCard: View {
+    @Environment(DiagnosticSession.self) private var session
+    let fallback: String
 
     var body: some View {
         let event = session.stitchProgress ?? session.progress
         VStack(spacing: 12) {
-            if let event, event.total > 0 {
-                ProgressView(value: Double(event.completed), total: Double(event.total))
-            } else {
-                ProgressView()
-            }
-            Text(event?.label ?? String(localized: "Stitching…")).font(.callout)
+            ProgressBar()
+                .animation(.linear(duration: 0.2), value: session.displayFraction)
+            Text(session.isStopping ? String(localized: "Stopping…") : event?.label ?? fallback)
+                .font(.callout)
+                .monospacedDigit()
             Button("Stop") { session.cancel() }
+                .disabled(session.isStopping)
         }
         .frame(width: 280)
         .padding(20)

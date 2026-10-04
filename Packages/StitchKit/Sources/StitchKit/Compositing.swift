@@ -151,9 +151,15 @@ final class Compositor: @unchecked Sendable {
         try check(status, message)
     }
 
-    func prepare() throws {
+    /// Exposure gains and seams, advancing `progress`.
+    func prepare(progress: WorkLeaf = .none) throws {
         var message = [CChar](repeating: 0, count: 512)
-        try check(sc_compositor_prepare(pointer, &message, message.count), message)
+        let observer = NativeProgress(progress)
+        let control = observer.control
+        let status = withExtendedLifetime(observer) {
+            withUnsafePointer(to: control) { sc_compositor_prepare(pointer, $0, &message, message.count) }
+        }
+        try check(status, message)
     }
 
     func addImage(_ index: Int, _ stored: StoredPixels) throws {
@@ -265,15 +271,17 @@ extension StitchEngine {
 
     /// Joins the main group of `report` into one image. The photos are decoded again from their files, so
     /// the report must have its local paths. Cancelling the calling task stops the work at the next photo.
-    /// Progress stages: "align", "seams" (k of n), "exposure", "compose" (k of n), "blend".
+    /// Progress stages: "align" (a fraction), "seams" (k of n), "exposure" (a fraction), "compose" (k of n), "blend".
     public nonisolated func stitch(
         _ report: MatchReport, request: StitchRequest = StitchRequest(),
         progress: (@Sendable (ProgressEvent) -> Void)? = nil
     ) async throws -> Panorama {
         let start = ContinuousClock.now
         var timings = PanoramaTimings()
-        progress?(ProgressEvent(stage: "align", completed: 0, total: 0))
-        let outcome = try Self.alignment(for: report, straighten: request.straighten)
+        // The alignment, then about 2 ms a photo for the layout and the compositor.
+        let meter = WorkMeter(stage: "align", emit: progress)
+        let outcome = try Self.alignment(for: report, straighten: request.straighten,
+                                         progress: meter.begin(after: 2e-3 * Double(report.images.count)))
         let problem = outcome.problem, alignment = outcome.alignment
         var notes = outcome.notes
         let images = problem.images
@@ -361,6 +369,7 @@ extension StitchEngine {
         timings.alignment = (ContinuousClock.now - start).seconds
 
         let space = ImageLoader.workingColorSpace(images)
+        meter.finish()
         let worker = compositor
         let (pixels, crop) = try await withTaskCancellationHandler {
             try Self.composite(worker, images: images, space: space, progress: progress, timings: &timings)
@@ -397,8 +406,9 @@ extension StitchEngine {
             try compositor.addSeamImage(index, ImageLoader.stored(image, target: compositor.seamSize(index), space: space))
             progress?(ProgressEvent(stage: "seams", completed: index + 1, total: images.count))
         }
-        progress?(ProgressEvent(stage: "exposure", completed: 0, total: 0))
-        try compositor.prepare()
+        let meter = WorkMeter(stage: "exposure", emit: progress)
+        try compositor.prepare(progress: meter.begin().leaf(1))
+        meter.finish()
         timings.seams = (ContinuousClock.now - clock).seconds
         clock = ContinuousClock.now
         progress?(ProgressEvent(stage: "compose", completed: 0, total: images.count))

@@ -249,7 +249,16 @@ func run() async throws {
 
     if options.align {
         let start = ContinuousClock.now
-        let summary = try engine.align(report)
+        // The bar on standard error, unless the output is to be diffed.
+        var bar: (@Sendable (ProgressEvent) -> Void)?
+        if !options.exact {
+            bar = { event in
+                guard let fraction = event.fraction else { return }
+                FileHandle.standardError.write(Data("\ralign \(Int(fraction * 100))%   ".utf8))
+            }
+        }
+        let summary = try engine.align(report, progress: bar)
+        if !options.exact { FileHandle.standardError.write(Data("\r".utf8)) }
         let elapsed = ContinuousClock.now - start
         // --exact: every digit, and the time on standard error, so that two builds' outputs can be diffed.
         if options.exact {
@@ -273,7 +282,11 @@ func run() async throws {
     if let file = options.stitch {
         let start = ContinuousClock.now
         let panorama = try await engine.stitch(report, request: options.request) { event in
-            if event.total > 0 { FileHandle.standardError.write(Data("\r\(event.stage) \(event.completed)/\(event.total)   ".utf8)) }
+            if let fraction = event.fraction {
+                FileHandle.standardError.write(Data("\r\(event.stage) \(Int(fraction * 100))%   ".utf8))
+            } else if event.total > 0 {
+                FileHandle.standardError.write(Data("\r\(event.stage) \(event.completed)/\(event.total)   ".utf8))
+            }
         }
         FileHandle.standardError.write(Data("\r".utf8))
         let crop = (options.crop ?? panorama.cropsByDefault) && !panorama.crop.isEmpty ? panorama.crop : nil

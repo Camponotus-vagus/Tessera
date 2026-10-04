@@ -6,6 +6,7 @@ Tessera uses the following software and models. Their licenses apply to the corr
 |---|---|---|
 | [OpenCV](https://opencv.org) 5.0.0 | SIFT, robust model fitting (USAC / MAGSAC++), bundle adjustment, warping, exposure compensation, seam finding and multi-band blending; linked statically into the app | Apache-2.0 |
 | Carotene, OpenCV's ARM NEON HAL (NVIDIA) | optimised image routines inside OpenCV | BSD-3-Clause |
+| OpenCV's bundle adjusters (Intel, Willow Garage) | a modified copy of their optimisation loop in `interruptible_adjuster.hpp`, so that the alignment reports its progress and stops when asked | BSD-3-Clause |
 | [ONNX Runtime](https://onnxruntime.ai) | optional, only in builds with the `ONNXRuntime` trait: ONNX keypoint selection and CPU backends for the learned models; not in the released app | MIT |
 | [RaCo](https://github.com/cvg/RaCo) (ETH Zurich, Computer Vision and Geometry group) | keypoint detector and ranker weights | Apache-2.0 |
 | [ALIKED](https://github.com/Shiaoming/ALIKED) | descriptor network weights | BSD-3-Clause |
@@ -15,7 +16,7 @@ Tessera uses the following software and models. Their licenses apply to the corr
 
 The models that Tessera downloads (`tessera-models-*.zip` in the releases) are converted from the RaCo, ALIKED and LightGlue weights with the scripts in `tools/export`. The conversion splits the networks and rewrites a few layers as equivalent matrix products; it does not retrain the weights. [Licenses/models.md](Licenses/models.md) lists which file comes from which weights; the archive contains it as `LICENSES.md`, with the Apache License 2.0.
 
-The app contains the license texts in `Tessera.app/Contents/Resources/Licenses`: Tessera's MIT License, this file, the Apache License 2.0, [Licenses/opencv.md](Licenses/opencv.md) (OpenCV's copyright notice and Carotene's license) and the licenses of the third-party code inside the OpenCV modules, as OpenCV's build installs them. The other license texts are in the linked repositories. Apache-2.0: https://www.apache.org/licenses/LICENSE-2.0. BSD-3-Clause: https://opensource.org/license/bsd-3-clause. MIT: https://opensource.org/license/mit.
+The app contains the license texts in `Tessera.app/Contents/Resources/Licenses`: Tessera's MIT License, this file, the Apache License 2.0, [Licenses/opencv.md](Licenses/opencv.md) (OpenCV's copyright notice, Carotene's license and that of the copied bundle adjusters) and the licenses of the third-party code inside the OpenCV modules, as OpenCV's build installs them. The other license texts are in the linked repositories. Apache-2.0: https://www.apache.org/licenses/LICENSE-2.0. BSD-3-Clause: https://opensource.org/license/bsd-3-clause. MIT: https://opensource.org/license/mit.
 
 ## References
 

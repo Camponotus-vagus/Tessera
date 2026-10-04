@@ -2,10 +2,12 @@ import CStitchCore
 import Foundation
 import simd
 
-public struct ProgressEvent: Sendable {
+public struct ProgressEvent: Sendable, Equatable {
     public var stage: String
     public var completed: Int
     public var total: Int
+    /// Share of the stage done, for stages that measure work instead of counting items (align, layout).
+    public var fraction: Double? = nil
 }
 
 /// Owns a native SIFT feature set.
@@ -60,7 +62,9 @@ public actor StitchEngine {
         let early = session == nil ? [] : Self.earlyPairs(readable, configuration)
         let (ready, readyPairs) = AsyncStream<(Extraction, Extraction)>.makeStream()
         defer { readyPairs.finish() }
-        async let earlyResult = Self.matchLearned(ready, session, configuration, progress)
+        // Counted with the extraction ("lightglue-early"): with every pair compared it goes on after it.
+        if !early.isEmpty { progress?(ProgressEvent(stage: "lightglue-early", completed: 0, total: early.count)) }
+        async let earlyResult = Self.matchLearned(ready, session, configuration, total: early.count, progress)
         async let siftResult = configuration.sources.contains(.rootSIFT)
             ? Self.extractSIFT(readable, configuration, progress) : ([:], [])
         async let learnedResult = Self.extractLearned(readable, session, progress) { done, latest in
@@ -82,7 +86,8 @@ public actor StitchEngine {
         // 2. Which pairs to match: all of them, or candidates ranked by a quick descriptor affinity.
         progress?(ProgressEvent(stage: "affinity", completed: 0, total: 0))
         var (candidates, affinity) = await Self.candidates(active, sift: sift, learned: learned,
-                                                           configuration: configuration)
+                                                           configuration: configuration, progress: progress)
+        try Task.checkCancellation()
         let lookup = Dictionary(uniqueKeysWithValues: active.map { ($0.id, $0) })
 
         // 3-4. Matching and geometric verification, only on the candidates.
@@ -99,7 +104,7 @@ public actor StitchEngine {
             }
             try Task.checkCancellation()
             progress?(ProgressEvent(stage: "verify", completed: 0, total: evidence.count))
-            let verified = await Self.verifyAll(evidence, images: images, configuration: configuration)
+            let verified = await Self.verifyAll(evidence, images: images, configuration: configuration, progress: progress)
             try Task.checkCancellation()
             return verified
         }
@@ -142,8 +147,10 @@ public actor StitchEngine {
                 let provisional = MatchReport(
                     createdAt: Date(), configuration: configuration, images: images, features: [], pairs: verified,
                     graph: graph, excludedByUser: excluded.sorted(), candidates: nil, learnedPipeline: nil, learnedProblem: nil)
-                progress?(ProgressEvent(stage: "overlap", completed: 0, total: 0))
-                let predicted = try Self.overlapping(provisional, tried: tried, perPhoto: Self.overlapRounds.perPhoto)
+                let meter = WorkMeter(stage: "layout", emit: progress)
+                let predicted = try Self.overlapping(provisional, tried: tried, perPhoto: Self.overlapRounds.perPhoto,
+                                                     progress: meter.begin())
+                meter.finish()
                 guard !predicted.isEmpty else { break }
                 progress?(ProgressEvent(stage: "overlap", completed: 0, total: predicted.count))
                 candidates += predicted
@@ -168,14 +175,23 @@ public actor StitchEngine {
     /// Layout-predicted pairs: above `minimumPhotos` photos, `count` rounds of at most `perPhoto` new pairs.
     static let overlapRounds = (minimumPhotos: 8, count: 2, perPhoto: 6)
 
+    private enum LayoutStep: Hashable, Sendable { case layout, document }
+
     /// Untried pairs of the main group that a provisional alignment of `report` places on top of each other,
     /// most overlapping first: for each photo its `perPhoto` best, at most four per photo in all.
-    /// Throws only when cancelled.
-    nonisolated static func overlapping(_ report: MatchReport, tried: Set<PairProposal.Key>, perPhoto: Int) throws
-        -> [CandidatePair] {
+    /// Throws only when cancelled. The provisional alignments advance `progress`.
+    nonisolated static func overlapping(_ report: MatchReport, tried: Set<PairProposal.Key>, perPhoto: Int,
+                                        progress: WorkSpan = .none) throws -> [CandidatePair] {
+        let component = report.graph.components.first ?? []
+        let estimate = AlignmentCost.size(report, component: component)
+        let layout = AlignmentCost.build * Double(estimate.pairs)
+            + AlignmentCost.align(report.configuration.mode, estimate, provisional: true)
+        let documentCost = AlignmentCost.build * Double(estimate.pairs)
+            + AlignmentCost.align(.document, estimate, provisional: true)
+        var plan = WorkPlan<LayoutStep>(progress, [(.layout, layout), (.document, 0.5 * documentCost)])
         var outcome: AlignmentOutcome
         do {
-            outcome = try alignment(for: report, straighten: false, provisional: true)
+            outcome = try alignment(for: report, straighten: false, provisional: true, progress: plan.next(.layout))
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -183,11 +199,13 @@ public actor StitchEngine {
         }
         // The layout only has to be right locally: when homographies fit the pairs better than the model
         // the mode picks (whose stretch rule guards the whole panorama), they predict the overlaps.
+        try Task.checkCancellation()
         if outcome.alignment.model != .rotation, outcome.alignment.model != .homography {
+            plan.revise(.document, documentCost)
             var flat = report
             flat.configuration.mode = .document
             func median(_ values: [Double]) -> Double { values.sorted().dropFirst(values.count / 2).first ?? .infinity }
-            let document = try? alignment(for: flat, straighten: false, provisional: true)
+            let document = try? alignment(for: flat, straighten: false, provisional: true, progress: plan.next(.document))
             try Task.checkCancellation()
             if let document, median(document.alignment.pairRMS) < median(outcome.alignment.pairRMS) {
                 outcome = document
@@ -291,7 +309,10 @@ public actor StitchEngine {
         let evidence = try await withThrowingTaskGroup(of: PairEvidence.self) { group in
             for (a, b) in pairs {
                 guard let (handleA, _) = extracted[a.id], let (handleB, _) = extracted[b.id] else { continue }
-                group.addTask { try Self.matchSIFT(a.id, handleA, b.id, handleB, configuration) }
+                group.addTask {
+                    try Task.checkCancellation()
+                    return try Self.matchSIFT(a.id, handleA, b.id, handleB, configuration)
+                }
             }
             var results: [PairEvidence] = []
             for try await item in group {
@@ -501,7 +522,7 @@ public actor StitchEngine {
     /// Matches pairs as they arrive, until the stream ends.
     private nonisolated static func matchLearned(
         _ pairs: AsyncStream<(Extraction, Extraction)>, _ session: LearnedSession?,
-        _ configuration: PipelineConfiguration, _ progress: (@Sendable (ProgressEvent) -> Void)?
+        _ configuration: PipelineConfiguration, total: Int, _ progress: (@Sendable (ProgressEvent) -> Void)?
     ) async throws -> [PairEvidence] {
         var evidence: [PairEvidence] = []
         for await (a, b) in pairs {
@@ -510,7 +531,7 @@ public actor StitchEngine {
             evidence.append(try await Task.detached(priority: .userInitiated) {
                 try Self.matchLearned(a, b, session, threshold: configuration.matchThreshold)
             }.value)
-            progress?(ProgressEvent(stage: "lightglue-match", completed: evidence.count, total: 0))
+            progress?(ProgressEvent(stage: "lightglue-early", completed: evidence.count, total: total))
         }
         return evidence
     }
@@ -583,7 +604,7 @@ public actor StitchEngine {
 
     private nonisolated static func candidates(
         _ images: [SourceImage], sift: [Int: (SIFTFeatures, ImageFeatures)], learned: [Int: Extraction],
-        configuration: PipelineConfiguration
+        configuration: PipelineConfiguration, progress: (@Sendable (ProgressEvent) -> Void)?
     ) async -> ([CandidatePair], [PairProposal.Key: Int]) {
         let pairs = allPairs(images)
         // With few photos every pair is cheap, and seeing all of them is more informative.
@@ -600,14 +621,25 @@ public actor StitchEngine {
             }
         }
         let affinity = await withTaskGroup(of: (PairProposal.Key, Int).self) { group in
+            var added = 0
             for (a, b) in pairs {
                 guard let da = subsets[a.id], let db = subsets[b.id], da.size == db.size, da.size > 0 else { continue }
+                added += 1
                 group.addTask {
-                    (PairProposal.Key(a.id, b.id), mutualMatches(da.values, db.values, size: da.size, ratio: 0.8))
+                    let key = PairProposal.Key(a.id, b.id)
+                    guard !Task.isCancelled else { return (key, 0) }
+                    return (key, mutualMatches(da.values, db.values, size: da.size, ratio: 0.8))
                 }
             }
+            // 137,000 pairs for 524 photos: one event per half percent.
+            let every = max(1, added / 200)
             var result: [PairProposal.Key: Int] = [:]
-            for await (key, count) in group { result[key] = count }
+            for await (key, count) in group {
+                result[key] = count
+                if result.count % every == 0 || result.count == added {
+                    progress?(ProgressEvent(stage: "affinity", completed: result.count, total: added))
+                }
+            }
             return result
         }
         return (PairProposal.propose(images: images, affinity: affinity, neighbours: configuration.proposalNeighbours),
@@ -641,7 +673,8 @@ public actor StitchEngine {
     // MARK: - Verification
 
     private nonisolated static func verifyAll(
-        _ pairs: [PairEvidence], images: [SourceImage], configuration: PipelineConfiguration
+        _ pairs: [PairEvidence], images: [SourceImage], configuration: PipelineConfiguration,
+        progress: (@Sendable (ProgressEvent) -> Void)?
     ) async -> [PairEvidence] {
         let lookup = Dictionary(uniqueKeysWithValues: images.map { ($0.id, $0) })
         return await withTaskGroup(of: (Int, PairEvidence).self) { group in
@@ -652,8 +685,14 @@ public actor StitchEngine {
                 }
             }
             var results = pairs
+            let every = max(1, pairs.count / 200)
+            var done = 0
             for await (index, pair) in group {
                 results[index] = pair
+                done += 1
+                if done % every == 0 || done == pairs.count {
+                    progress?(ProgressEvent(stage: "verify", completed: done, total: pairs.count))
+                }
             }
             return results
         }

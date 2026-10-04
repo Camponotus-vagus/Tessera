@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import Observation
 import StitchKit
+import Synchronization
 
 struct PairID: Hashable {
     var a: Int
@@ -17,6 +18,41 @@ enum DetailTab: Hashable {
     case graph
     case pair
     case panorama
+}
+
+/// Hands engine events to the main actor: the newest event of each stage, with at most one hop in flight, so that
+/// a burst of events costs one update of the views.
+final class ProgressRelay: Sendable {
+    private let state = Mutex<(pending: [ProgressEvent], scheduled: Bool)>(([], false))
+    private let deliver: @MainActor @Sendable ([ProgressEvent]) -> Void
+
+    init(_ deliver: @escaping @MainActor @Sendable ([ProgressEvent]) -> Void) {
+        self.deliver = deliver
+    }
+
+    func send(_ event: ProgressEvent) {
+        let schedule = state.withLock { state -> Bool in
+            if let index = state.pending.firstIndex(where: { $0.stage == event.stage }) {
+                state.pending[index] = event
+            } else {
+                state.pending.append(event)
+            }
+            guard !state.scheduled else { return false }
+            state.scheduled = true
+            return true
+        }
+        guard schedule else { return }
+        Task { @MainActor in
+            let events = self.state.withLock { state -> [ProgressEvent] in
+                defer {
+                    state.pending = []
+                    state.scheduled = false
+                }
+                return state.pending
+            }
+            self.deliver(events)
+        }
+    }
 }
 
 /// Why the panorama on screen no longer matches the session.
@@ -56,6 +92,14 @@ final class DiagnosticSession {
     var cropsPanorama = true
     private(set) var isStitching = false
     private(set) var stitchProgress: ProgressEvent?
+    /// Stop was pressed and the work has not ended yet.
+    private(set) var isStopping = false
+    /// Share of the current stage done, when it is known; it never goes back within a stage.
+    private(set) var displayFraction: Double?
+    private var phase: String?
+    /// The latest event of each extractor, which run side by side, and how many run.
+    private var extraction: [String: ProgressEvent] = [:]
+    private var extractors = 1
     private(set) var isExporting = false
     private(set) var lastExport: URL?
 
@@ -146,8 +190,11 @@ final class DiagnosticSession {
         stitching = nil
         isRunning = false
         isStitching = false
+        isStopping = false
         progress = nil
         stitchProgress = nil
+        displayFraction = nil
+        phase = nil
         panorama = nil
         lastExport = nil
         images = []
@@ -184,8 +231,41 @@ final class DiagnosticSession {
     }
 
     func cancel() {
+        if isBusy { isStopping = true }
         analysis?.cancel()
         stitching?.cancel()
+    }
+
+    private enum Stream { case analysis, stitch }
+
+    /// Shows the events of the current run, unless it was stopped or replaced.
+    private func apply(_ events: [ProgressEvent], _ stream: Stream, _ generation: Int) {
+        guard generation == self.generation, !isStopping, stream == .analysis ? isRunning : isStitching else { return }
+        for event in events {
+            // The two extractors run side by side with LightGlue's matching of the pairs compared in any case
+            // (consecutive shots, or every pair): one phase.
+            let extracting = ["sift", "lightglue-extract", "lightglue-early"].contains(event.stage)
+            let phase = extracting ? "features" : event.stage
+            if phase != self.phase {
+                self.phase = phase
+                displayFraction = nil
+                extraction = [:]
+            }
+            var fraction = event.fraction ?? (event.total > 0 ? Double(event.completed) / Double(event.total) : nil)
+            if extracting {
+                // Counted against every extractor from the start, so that a fast one does not fill the bar alone.
+                extraction[event.stage] = event
+                let started = extraction.keys.filter { $0 != "lightglue-early" }.count
+                let photos = extraction.values.first { $0.stage != "lightglue-early" }?.total ?? 0
+                let total = extraction.values.reduce(0) { $0 + $1.total } + max(0, extractors - started) * photos
+                fraction = total > 0 ? Double(extraction.values.reduce(0) { $0 + $1.completed }) / Double(total) : nil
+            }
+            if let fraction { displayFraction = max(displayFraction ?? 0, min(fraction, 1)) }
+            switch stream {
+            case .analysis: if progress != event { progress = event }
+            case .stitch: if stitchProgress != event { stitchProgress = event }
+            }
+        }
     }
 
     /// Joins the main group into one image, analysing first when needed. A failed or stopped stitch keeps
@@ -199,7 +279,10 @@ final class DiagnosticSession {
             defer {
                 if generation == self.generation {
                     isStitching = false
+                    isStopping = false
                     stitchProgress = nil
+                    displayFraction = nil
+                    phase = nil
                     stitching = nil
                 }
             }
@@ -218,11 +301,8 @@ final class DiagnosticSession {
             return
         }
         do {
-            let result = try await engine.stitch(report, request: stitchRequest) { [weak self] event in
-                Task { @MainActor in
-                    if self?.generation == generation { self?.stitchProgress = event }
-                }
-            }
+            let relay = ProgressRelay { [weak self] events in self?.apply(events, .stitch, generation) }
+            let result = try await engine.stitch(report, request: stitchRequest) { relay.send($0) }
             guard generation == self.generation else { return }
             panorama = result
             lastExport = nil
@@ -270,19 +350,23 @@ final class DiagnosticSession {
                 isRunning = false
                 progress = nil
                 analysis = nil
+                // A stitch runs the analysis first: its Stop lasts until the stitch ends.
+                if !isStitching {
+                    isStopping = false
+                    displayFraction = nil
+                    phase = nil
+                }
             }
         }
         var configuration = configuration
         configuration.sources = activeSources
+        extractors = max(1, configuration.sources.count)
         let start = ContinuousClock.now
         do {
+            let relay = ProgressRelay { [weak self] events in self?.apply(events, .analysis, generation) }
             let result = try await engine.analyze(
                 urls: images.map(\.url), configuration: configuration, excluded: excluded
-            ) { [weak self] event in
-                Task { @MainActor in
-                    if self?.generation == generation { self?.progress = event }
-                }
-            }
+            ) { relay.send($0) }
             guard generation == self.generation else { return }
             report = result
             lastDuration = ContinuousClock.now - start
