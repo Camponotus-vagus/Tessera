@@ -5,7 +5,7 @@
 set -euo pipefail
 root="${0:A:h:h}"
 configuration="${1:-release}"
-version="${TESSERA_VERSION:-0.1.3}"
+version="${TESSERA_VERSION:-0.1.4}"
 cd "$root"
 traits=()
 [ "${TESSERA_TRAITS:-}" = onnx ] && traits=(--traits ONNXRuntime)

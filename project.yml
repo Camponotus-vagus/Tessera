@@ -28,7 +28,7 @@ targets:
       base:
         PRODUCT_NAME: Tessera
         PRODUCT_BUNDLE_IDENTIFIER: io.github.camponotus-vagus.Tessera
-        MARKETING_VERSION: "0.1.3"
+        MARKETING_VERSION: "0.1.4"
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Tessera
