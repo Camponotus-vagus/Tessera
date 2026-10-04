@@ -8,12 +8,13 @@
 
 #include "stitchcore.h"
 
-#include <Accelerate/Accelerate.h>
+#include <dispatch/dispatch.h>
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@
 #include <opencv2/stitching/detail/matchers.hpp>
 #include <opencv2/stitching/detail/motion_estimators.hpp>
 
+#include "block_cholesky.hpp"
 #include "common.hpp"
 #include "interruptible_adjuster.hpp"
 #include "progress.hpp"
@@ -78,23 +80,46 @@ double stretch(const cv::Matx33d &m, const cv::Vec2d &p) {
 
 double huber(double scaled, double k = 2.0) { return scaled <= k ? 1.0 : k / scaled; }
 
+// Runs body(p) for every p below `count`, `grain` at a time on GCD's threads at the caller's priority, or on
+// this thread when there is a single chunk. Each p runs on one thread from start to end, so what the body
+// writes for p, and every sum taken afterwards in the order of p, is the same however many threads run.
+template <class F>
+void each(size_t count, size_t grain, const F &body) {
+    const size_t chunks = (count + grain - 1) / grain;
+    if (chunks < 2) {
+        for (size_t p = 0; p < count; ++p) body(p);
+        return;
+    }
+    const F *run = &body;
+    dispatch_apply(chunks, DISPATCH_APPLY_AUTO, ^(size_t k) {
+        const size_t end = std::min(count, (k + 1) * grain);
+        for (size_t p = k * grain; p < end; ++p) (*run)(p);
+    });
+}
+
+// Pairs per chunk of the parallel loops: a few hundred correspondences each.
+constexpr size_t pair_grain = 4;
+
 // Transfer error of every correspondence a -> b through the global transforms (image -> mosaic).
 void transfer_errors(const std::vector<cv::Matx33d> &G, const std::vector<Pair> &pairs, double *pair_rms,
                      double &rms) {
-    double total = 0;
-    size_t count = 0;
-    for (size_t p = 0; p < pairs.size(); ++p) {
+    std::vector<double> sums(pairs.size());
+    each(pairs.size(), pair_grain, [&](size_t p) {
         const cv::Matx33d to_b = G[pairs[p].b].inv() * G[pairs[p].a];
         double sum = 0;
-        size_t n = 0;
         for (const Correspondence &c : pairs[p].points) {
             cv::Vec2d q;
             const double e = apply(to_b, c.a, q) ? cv::norm(q - c.b) : 1e6;
-            sum += e * e;
-            ++n;
+            sum = std::fma(e, e, sum);
         }
-        if (pair_rms) pair_rms[p] = n ? std::sqrt(sum / n) : 0;
-        total += sum;
+        sums[p] = sum;
+    });
+    double total = 0;
+    size_t count = 0;
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        const size_t n = pairs[p].points.size();
+        if (pair_rms) pair_rms[p] = n ? std::sqrt(sums[p] / n) : 0;
+        total += sums[p];
         count += n;
     }
     rms = count ? std::sqrt(total / count) : 0;
@@ -125,8 +150,9 @@ std::vector<std::pair<int, int>> spanning_order(int n, const std::vector<Pair> &
 
 // Normal equations with `d` unknowns per photo, coupled only between the photos of a pair: stored by
 // d x d blocks (the lower block triangle, diagonal blocks whole, each block column-major) and solved with
-// Accelerate's sparse Cholesky, analysed once and refactored at every step. Dense, they grew with the cube
-// of the number of photos: 4184 unknowns for 524 homographies.
+// a sparse block Cholesky, analysed once and refactored at every step. Dense, they grew with the cube of
+// the number of photos: 4184 unknowns for 524 homographies. Accelerate's sparse Cholesky gave different
+// last bits from run to run, which could flip the drop and model choices; BlockCholesky gives the same.
 class BlockNormalEquations {
 public:
     BlockNormalEquations(int blocks, int d, const std::vector<std::pair<int, int>> &links) : blocks_(blocks), d_(d) {
@@ -136,22 +162,17 @@ public:
             if (a < 0 || b < 0 || a == b) continue;
             rows[std::min(a, b)].push_back(std::max(a, b));
         }
-        starts_.assign(blocks + 1, 0);
+        size_t stored = 0;
         for (int j = 0; j < blocks; ++j) {
             std::sort(rows[j].begin(), rows[j].end());
             rows[j].erase(std::unique(rows[j].begin(), rows[j].end()), rows[j].end());
-            starts_[j + 1] = starts_[j] + static_cast<long>(rows[j].size());
-            for (int i : rows[j]) {
-                index_[key(i, j)] = static_cast<int>(rows_.size());
-                rows_.push_back(i);
-            }
+            for (int i : rows[j]) index_[key(i, j)] = static_cast<int>(stored++);
         }
-        values_.assign(rows_.size() * d * d, 0.0);
+        values_.assign(stored * d * d, 0.0);
         rhs_.assign(static_cast<size_t>(blocks) * d, 0.0);
-        symbolic_ = SparseFactor(SparseFactorizationCholesky, structure());
+        cholesky_ = std::make_unique<stitchcore::BlockCholesky>(blocks, d, rows);
     }
 
-    ~BlockNormalEquations() { SparseCleanup(symbolic_); }
     BlockNormalEquations(const BlockNormalEquations &) = delete;
     BlockNormalEquations &operator=(const BlockNormalEquations &) = delete;
 
@@ -171,8 +192,7 @@ public:
     // unknowns of each block (all of them when negative, at least 1e-6 of the block's largest) and zero elsewhere, so that damping pulls those
     // unknowns towards `towards` (zero when it is null); false when the matrix is not positive definite.
     bool solve(std::vector<double> &x, double damping, const std::vector<double> *towards = nullptr,
-               int damped = -1) const {
-        if (symbolic_.status != SparseStatusOK) return false;
+               int damped = -1) {
         std::vector<double> values = values_;
         x = rhs_;
         if (damping != 0) {
@@ -188,39 +208,18 @@ public:
                 }
             }
         }
-        SparseMatrix_Double matrix{structure(), values.data()};
-        SparseOpaqueFactorization_Double factor = SparseFactor(symbolic_, matrix);
-        if (factor.status != SparseStatusOK) {
-            SparseCleanup(factor);
-            return false;
-        }
-        DenseVector_Double vector{static_cast<int>(x.size()), x.data()};
-        SparseSolve(factor, vector);
-        SparseCleanup(factor);
+        if (!cholesky_->factor(values.data())) return false;
+        cholesky_->solve(x.data());
         return std::all_of(x.begin(), x.end(), [](double v) { return std::isfinite(v); });
     }
 
 private:
     static long long key(int i, int j) { return (static_cast<long long>(i) << 32) | static_cast<unsigned>(j); }
 
-    SparseMatrixStructure structure() const {
-        SparseMatrixStructure structure{};
-        structure.rowCount = blocks_;
-        structure.columnCount = blocks_;
-        structure.columnStarts = const_cast<long *>(starts_.data());
-        structure.rowIndices = const_cast<int *>(rows_.data());
-        structure.attributes.kind = SparseSymmetric;
-        structure.attributes.triangle = SparseLowerTriangle;
-        structure.blockSize = static_cast<uint8_t>(d_);
-        return structure;
-    }
-
     int blocks_, d_;
-    std::vector<long> starts_;
-    std::vector<int> rows_;
     std::map<long long, int> index_;
     std::vector<double> values_, rhs_;
-    SparseOpaqueSymbolicFactorization symbolic_{};
+    std::unique_ptr<stitchcore::BlockCholesky> cholesky_;
 };
 
 // The blocks of the normal equations that a pair of photos fills (blocks ba and bb, -1 for the
@@ -238,17 +237,63 @@ struct PairBlocks {
         }
     }
 
-    // One residual row: Ja and Jb are its derivatives with respect to a's and b's d unknowns.
-    void add(int d, const double *Ja, const double *Jb, double w) {
+    // Adds one pair's sums (PairSums), in its own order.
+    void add(int d, const double *sums) {
+        const double *saa = sums, *sbb = sums + d * d, *sab = sums + 2 * d * d;
         for (int j = 0; j < d; ++j) {
             for (int i = 0; i < d; ++i) {
-                if (aa) aa[j * d + i] += w * Ja[i] * Ja[j];
-                if (bb) bb[j * d + i] += w * Jb[i] * Jb[j];
-                if (ab) ab[ab_row_a ? j * d + i : i * d + j] -= w * Ja[i] * Jb[j];
+                if (aa) aa[j * d + i] += saa[j * d + i];
+                if (bb) bb[j * d + i] += sbb[j * d + i];
+                if (ab) ab[ab_row_a ? j * d + i : i * d + j] += sab[j * d + i];
             }
         }
     }
 };
+
+// One pair's share of the normal equations, summed over its correspondences on one thread: blocks aa, bb
+// and ab (a's unknowns as rows), each d x d column-major, then the right-hand side of a and of b.
+struct PairSums {
+    int d;
+    double *aa, *bb, *ab, *ra, *rb;
+
+    static size_t stride(int d) { return static_cast<size_t>(3 * d * d + 2 * d); }
+
+    PairSums(int d, double *sums) : d(d), aa(sums), bb(sums + d * d), ab(sums + 2 * d * d), ra(sums + 3 * d * d),
+                                    rb(sums + 3 * d * d + d) {
+        std::fill(sums, sums + stride(d), 0.0);
+    }
+
+    // One residual row r: Ja and Jb are its derivatives with respect to a's and b's d unknowns, and the
+    // right-hand side gets -w Ja r for a and +w Jb r for b.
+    void add(const double *Ja, const double *Jb, double w, double r) {
+        for (int j = 0; j < d; ++j) {
+            for (int i = 0; i < d; ++i) {
+                aa[j * d + i] += w * Ja[i] * Ja[j];
+                bb[j * d + i] += w * Jb[i] * Jb[j];
+                ab[j * d + i] -= w * Ja[i] * Jb[j];
+            }
+        }
+        for (int i = 0; i < d; ++i) {
+            ra[i] -= w * Ja[i] * r;
+            rb[i] += w * Jb[i] * r;
+        }
+    }
+};
+
+// Adds every pair's sums to the normal equations, in the order of the pairs.
+void gather(BlockNormalEquations &system, std::vector<PairBlocks> &blocks, const std::vector<double> &sums,
+            const std::vector<int> &slot_a, const std::vector<int> &slot_b, int d) {
+    system.clear();
+    const size_t stride = PairSums::stride(d);
+    for (size_t p = 0; p < blocks.size(); ++p) {
+        const double *s = sums.data() + p * stride;
+        blocks[p].add(d, s);
+        for (int i = 0; i < d; ++i) {
+            if (slot_a[p] >= 0) system.rhs(slot_a[p] + i) += s[3 * d * d + i];
+            if (slot_b[p] >= 0) system.rhs(slot_b[p] + i) += s[3 * d * d + d + i];
+        }
+    }
+}
 
 // MARK: Translation, similarity, affine
 
@@ -320,21 +365,31 @@ bool solve_linear(sc_align_model model, const std::vector<cv::Size> &sizes, cons
         return true;
     }
 
+    std::vector<cv::Matx33d> M(n);
     auto evaluate = [&](int image, const cv::Vec2d &p, cv::Vec2d &value) {
         if (slot[image] < 0) { value = p; return; }
-        const cv::Matx33d M = linear_transform(model, theta.data() + slot[image], centre[image]);
-        apply(M, p, value);
+        apply(M[image], p, value);
     };
 
     std::vector<std::pair<int, int>> links;
     auto block = [&](int image) { return slot[image] < 0 ? -1 : slot[image] / d; };
     for (const Pair &pair : pairs) links.emplace_back(block(pair.a), block(pair.b));
     BlockNormalEquations system(unknowns, d, links);
+    std::vector<PairBlocks> blocks;
+    std::vector<int> slot_a, slot_b;
+    for (const Pair &pair : pairs) {
+        blocks.emplace_back(system, block(pair.a), block(pair.b));
+        slot_a.push_back(slot[pair.a]);
+        slot_b.push_back(slot[pair.b]);
+    }
+    std::vector<double> sums(pairs.size() * PairSums::stride(d));
     for (iterations = 0; iterations < 8; ++iterations) {
         monitor.check(iterations / 8.0);
-        system.clear();
-        for (const Pair &pair : pairs) {
-            PairBlocks blocks(system, block(pair.a), block(pair.b));
+        for (int i = 0; i < n; ++i)
+            if (slot[i] >= 0) M[i] = linear_transform(model, theta.data() + slot[i], centre[i]);
+        each(pairs.size(), pair_grain, [&](size_t p) {
+            const Pair &pair = pairs[p];
+            PairSums pair_sums(d, sums.data() + p * PairSums::stride(d));
             for (const Correspondence &c : pair.points) {
                 cv::Vec2d ma, mb;
                 evaluate(pair.a, c.a, ma);
@@ -350,16 +405,10 @@ bool solve_linear(sc_align_model model, const std::vector<cv::Size> &sizes, cons
                 if (slot[pair.b] < 0) kb = c.b;
                 // r = Ja theta_a + ka - (Jb theta_b + kb); normal equations of sum w |r|^2.
                 const cv::Vec2d k = ka - kb;
-                const int sa = slot[pair.a], sb = slot[pair.b];
-                for (int r = 0; r < 2; ++r) {
-                    blocks.add(d, Ja[r], Jb[r], w);
-                    for (int i = 0; i < d; ++i) {
-                        if (sa >= 0) system.rhs(sa + i) -= w * Ja[r][i] * k[r];
-                        if (sb >= 0) system.rhs(sb + i) += w * Jb[r][i] * k[r];
-                    }
-                }
+                for (int r = 0; r < 2; ++r) pair_sums.add(Ja[r], Jb[r], w, k[r]);
             }
-        }
+        });
+        gather(system, blocks, sums, slot_a, slot_b, d);
         // A degenerate pair (collinear points for an affine fit, a single point for a similarity) leaves the
         // matrix singular, and roundoff can still let the factorisation through, with any value in the free
         // directions. A tiny ridge on the linear part (all but the last two unknowns of a photo) keeps it at
@@ -474,24 +523,36 @@ bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pa
         }
     }
 
-    // Residuals in the mosaic plane, rescaled to photo pixels by the local stretch of each side.
-    auto energy = [&](std::vector<double> *weights) -> double {
-        double total = 0;
-        size_t k = 0;
-        for (size_t p = 0; p < pairs.size(); ++p) {
+    // Where each pair's correspondences start in the list of weights.
+    std::vector<size_t> first(pairs.size() + 1, 0);
+    for (size_t p = 0; p < pairs.size(); ++p) first[p + 1] = first[p] + normal[p].size();
+
+    // Residuals in the mosaic plane, rescaled to photo pixels by the local stretch of each side: summed
+    // pair by pair, then over the pairs in order.
+    std::vector<double> pair_energy(pairs.size());
+    auto energy = [&](const std::vector<double> *weights) -> double {
+        each(pairs.size(), pair_grain, [&](size_t p) {
             const Pair &pair = pairs[p];
+            double total = 0;
+            size_t k = first[p];
             for (const Point &c : normal[p]) {
                 cv::Vec2d ma, mb;
-                if (!apply(Hn[pair.a], c.a, ma) || !apply(Hn[pair.b], c.b, mb)) return INFINITY;
+                if (!apply(Hn[pair.a], c.a, ma) || !apply(Hn[pair.b], c.b, mb)) {
+                    total = INFINITY;
+                    break;
+                }
                 const double sa = stretch(Hn[pair.a], c.a) * mosaic_scale * N[pair.a](0, 0);
                 const double sb = stretch(Hn[pair.b], c.b) * mosaic_scale * N[pair.b](0, 0);
                 const double to_pixels = mosaic_scale * 2.0 / (sa + sb);
                 const double error = cv::norm(ma - mb) * to_pixels / c.sigma;
                 const double w = weights ? (*weights)[k] : 1.0;
-                total += w * error * error;
+                total = std::fma(w * error, error, total);
                 ++k;
             }
-        }
+            pair_energy[p] = total;
+        });
+        double total = 0;
+        for (double e : pair_energy) total += e;
         return total;
     };
 
@@ -503,15 +564,23 @@ bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pa
     auto block = [&](int image) { return slot[image] < 0 ? -1 : slot[image] / 8; };
     for (const Pair &pair : pairs) links.emplace_back(block(pair.a), block(pair.b));
     BlockNormalEquations system(unknowns, 8, links);
+    std::vector<PairBlocks> blocks;
+    std::vector<int> slot_a, slot_b;
+    for (const Pair &pair : pairs) {
+        blocks.emplace_back(system, block(pair.a), block(pair.b));
+        slot_a.push_back(slot[pair.a]);
+        slot_b.push_back(slot[pair.b]);
+    }
+    std::vector<double> sums(pairs.size() * PairSums::stride(8));
+    weights.assign(first.back(), 0.0);
     for (iterations = 0; iterations < 60 && !converged; ++iterations) {
         monitor.check(homography_fraction(iterations));
         // Huber weights on the current residuals, scale factors frozen for this step; the right-hand side
         // holds -g, the descent direction.
-        weights.clear();
-        system.clear();
-        for (size_t p = 0; p < pairs.size(); ++p) {
+        each(pairs.size(), pair_grain, [&](size_t p) {
             const Pair &pair = pairs[p];
-            PairBlocks blocks(system, block(pair.a), block(pair.b));
+            PairSums pair_sums(8, sums.data() + p * PairSums::stride(8));
+            size_t k = first[p];
             for (const Point &c : normal[p]) {
                 double Ja[2][8], Jb[2][8];
                 cv::Vec2d ma, mb;
@@ -522,19 +591,13 @@ bool solve_homographies(const std::vector<cv::Size> &sizes, const std::vector<Pa
                 const double to_pixels = mosaic_scale * 2.0 / (sa + sb) / c.sigma;
                 const cv::Vec2d r = (ma - mb) * to_pixels;
                 const double hw = huber(cv::norm(r));
-                weights.push_back(hw);
+                weights[k++] = hw;
                 const double w = hw * to_pixels * to_pixels;
                 const cv::Vec2d rm = ma - mb;
-                const int sa_ = slot[pair.a], sb_ = slot[pair.b];
-                for (int row = 0; row < 2; ++row) {
-                    blocks.add(8, Ja[row], Jb[row], w);
-                    for (int i = 0; i < 8; ++i) {
-                        if (sa_ >= 0) system.rhs(sa_ + i) -= w * Ja[row][i] * rm[row];
-                        if (sb_ >= 0) system.rhs(sb_ + i) += w * Jb[row][i] * rm[row];
-                    }
-                }
+                for (int row = 0; row < 2; ++row) pair_sums.add(Ja[row], Jb[row], w, rm[row]);
             }
-        }
+        });
+        gather(system, blocks, sums, slot_a, slot_b, 8);
         const double before = energy(&weights);
         bool improved = false;
         for (int attempt = 0; attempt < 10 && !improved; ++attempt) {
@@ -942,7 +1005,7 @@ extern "C" int32_t sc_align(sc_align_model model, const sc_align_image *images, 
                 for (const Correspondence &c : list[p].points) {
                     cv::Vec2d q;
                     const double e = apply(H, c.a, q) ? cv::norm(q - c.b) : 1e6;
-                    sum += e * e;
+                    sum = std::fma(e, e, sum);
                 }
                 list_rms[p] = std::sqrt(sum / list[p].points.size());
                 total += sum;

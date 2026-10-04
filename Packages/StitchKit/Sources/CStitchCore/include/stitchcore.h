@@ -221,9 +221,8 @@ typedef struct {
 /// `pair_rms` (optional, `pair_count` entries) receives the RMS transfer error of each element of `pairs`, in
 /// the same order, and 0 for a pair without a finite correspondence. It is written only when sc_align returns 0.
 /// `progress` may be NULL: no reports, no stop, and OpenCV's own bundle adjusters. With it, the results are the
-/// same (bit for bit for the rotation; the planar models' sparse solver sums in a different order from run to run
-/// when it uses several threads). Returns 0 (aligned), 1 (failed, message in `error`) or 2 (stopped through
-/// `progress`); on 2,
+/// same bit for bit, and so are the results of repeated calls with the same input, whatever the number of cores.
+/// Returns 0 (aligned), 1 (failed, message in `error`) or 2 (stopped through `progress`); on 2,
 /// `error` holds "cancelled", `*result` is zero, and `transforms`, `focals` and `pair_rms` are untouched.
 int32_t sc_align(sc_align_model model, const sc_align_image *images, int32_t image_count,
                  const sc_align_pair *pairs, int32_t pair_count, int32_t anchor, int32_t wave, double *transforms,

@@ -86,7 +86,9 @@ struct FeatureMap {
         }
         const int total = level_channels * static_cast<int>(levels.size());
         float norm = 0;
-        for (int c = 0; c < total; ++c) norm += out[c] * out[c];
+        // std::fma: the fused product -Os gives; vectorised at -O2 and above, the loop split it into a
+        // product and an ordered sum, which changed the last bit of the descriptors.
+        for (int c = 0; c < total; ++c) norm = std::fma(out[c], out[c], norm);
         const float inverse = 1.0f / std::max(std::sqrt(norm), 1e-12f);
         for (int c = 0; c < total; ++c) out[c] *= inverse;
     }
@@ -207,99 +209,108 @@ extern "C" int32_t sc_describe(const sc_descriptor_head *head, const float *cons
     const int patch_size = C * K * K, offsets_size = 2 * P;
     const float scale_x = static_cast<float>(width - 1), scale_y = static_cast<float>(height - 1);
 
-    // Pixel positions as the network computes them: normalise to [-1, 1] and back.
-    std::vector<float> pixel(static_cast<size_t>(count) * 2);
-    for (int n = 0; n < count; ++n) {
-        // Keypoints come from the network inside the image; anything else is clamped so lookups stay in bounds.
-        float kx = keypoints[2 * n], ky = keypoints[2 * n + 1];
-        if (!std::isfinite(kx)) kx = 0;
-        if (!std::isfinite(ky)) ky = 0;
-        kx = std::clamp(kx, 0.0f, scale_x);
-        ky = std::clamp(ky, 0.0f, scale_y);
-        const float nx = 2 * kx / scale_x - 1, ny = 2 * ky / scale_y - 1;
-        pixel[2 * n] = (nx / 2 + 0.5f) * scale_x;
-        pixel[2 * n + 1] = (ny / 2 + 0.5f) * scale_y;
-    }
-
-    // Blocks capture C++ objects as const copies, so the parallel loops only see raw pointers.
-    const FeatureMap *features = &map;
-    const float *points = pixel.data();
-
-    // 1. Patches around each keypoint: [count, C * K * K] in (channel, row, column) order.
-    std::vector<float> patches(static_cast<size_t>(count) * patch_size);
-    float *patch_rows = patches.data();
-    dispatch_apply(static_cast<size_t>(count), DISPATCH_APPLY_AUTO, ^(size_t n) {
-        std::vector<float> feature(C);
-        const int64_t px = static_cast<int64_t>(points[2 * n]), py = static_cast<int64_t>(points[2 * n + 1]);
-        const int64_t corner_x = static_cast<int64_t>(static_cast<float>(px) - K / 2.0f + 1);
-        const int64_t corner_y = static_cast<int64_t>(static_cast<float>(py) - K / 2.0f + 1);
-        const int x0 = static_cast<int>(std::clamp<int64_t>(corner_x, 0, width - 1 - K));
-        const int y0 = static_cast<int>(std::clamp<int64_t>(corner_y, 0, height - 1 - K));
-        float *row = patch_rows + n * patch_size;
-        for (int ky = 0; ky < K; ++ky) {
-            for (int kx = 0; kx < K; ++kx) {
-                features->at(x0 + kx, y0 + ky, feature.data());
-                for (int c = 0; c < C; ++c) row[c * K * K + ky * K + kx] = feature[c];
-            }
+    try {
+        // Pixel positions as the network computes them: normalise to [-1, 1] and back.
+        std::vector<float> pixel(static_cast<size_t>(count) * 2);
+        for (int n = 0; n < count; ++n) {
+            // Keypoints come from the network inside the image; anything else is clamped so lookups stay in bounds.
+            float kx = keypoints[2 * n], ky = keypoints[2 * n + 1];
+            if (!std::isfinite(kx)) kx = 0;
+            if (!std::isfinite(ky)) ky = 0;
+            kx = std::clamp(kx, 0.0f, scale_x);
+            ky = std::clamp(ky, 0.0f, scale_y);
+            const float nx = 2 * kx / scale_x - 1, ny = 2 * ky / scale_y - 1;
+            pixel[2 * n] = (nx / 2 + 0.5f) * scale_x;
+            pixel[2 * n + 1] = (ny / 2 + 0.5f) * scale_y;
         }
-    });
 
-    // 2. Offsets: two layers on the patches, then clamped.
-    std::vector<float> hidden(static_cast<size_t>(count) * offsets_size);
-    gemm_transposed(patches.data(), head->offset_weight.data(), hidden.data(), count, offsets_size, patch_size);
-    for (int n = 0; n < count; ++n) {
-        for (int j = 0; j < offsets_size; ++j) {
-            float &value = hidden[static_cast<size_t>(n) * offsets_size + j];
-            value = selu(value + head->offset_bias[j]);
-        }
-    }
-    std::vector<float> offsets(static_cast<size_t>(count) * offsets_size);
-    gemm_transposed(hidden.data(), head->second_weight.data(), offsets.data(), count, offsets_size, offsets_size);
-    const float maximum = static_cast<float>(std::max(width, height)) / 4.0f;
-    for (int n = 0; n < count; ++n) {
-        for (int j = 0; j < offsets_size; ++j) {
-            float &value = offsets[static_cast<size_t>(n) * offsets_size + j];
-            value = std::clamp(value + head->second_bias[j], -maximum, maximum);
-        }
-    }
+        // Blocks capture C++ objects as const copies, so the parallel loops only see raw pointers. Each keypoint
+        // has its own row of `scratch` for a feature vector: nothing is allocated inside the blocks.
+        const FeatureMap *features = &map;
+        const float *points = pixel.data();
+        std::vector<float> scratch(static_cast<size_t>(count) * C);
+        float *scratch_rows = scratch.data();
 
-    // 3. Deformable samples: bilinear on the normalised map, zero outside (grid_sample, align_corners).
-    std::vector<float> samples(static_cast<size_t>(count) * P * C, 0.0f);
-    const float *offset_rows = offsets.data();
-    float *sample_rows = samples.data();
-    dispatch_apply(static_cast<size_t>(count), DISPATCH_APPLY_AUTO, ^(size_t n) {
-        std::vector<float> feature(C);
-        for (int p = 0; p < P; ++p) {
-            const float ox = offset_rows[n * offsets_size + p], oy = offset_rows[n * offsets_size + P + p];
-            const float gx = 2 * (points[2 * n] + ox) / scale_x - 1, gy = 2 * (points[2 * n + 1] + oy) / scale_y - 1;
-            const float x = (gx + 1) / 2 * scale_x, y = (gy + 1) / 2 * scale_y;
-            if (!std::isfinite(x) || !std::isfinite(y)) continue;
-            const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
-            const float ax = x - static_cast<float>(x0), ay = y - static_cast<float>(y0);
-            float *target = sample_rows + (n * P + p) * C;
-            for (int dy = 0; dy < 2; ++dy) {
-                for (int dx = 0; dx < 2; ++dx) {
-                    const int xx = x0 + dx, yy = y0 + dy;
-                    if (xx < 0 || yy < 0 || xx >= width || yy >= height) continue;
-                    const float weight = (dx ? ax : 1 - ax) * (dy ? ay : 1 - ay);
-                    features->at(xx, yy, feature.data());
-                    for (int c = 0; c < C; ++c) target[c] += weight * feature[c];
+        // 1. Patches around each keypoint: [count, C * K * K] in (channel, row, column) order.
+        std::vector<float> patches(static_cast<size_t>(count) * patch_size);
+        float *patch_rows = patches.data();
+        dispatch_apply(static_cast<size_t>(count), DISPATCH_APPLY_AUTO, ^(size_t n) {
+            float *feature = scratch_rows + n * C;
+            const int64_t px = static_cast<int64_t>(points[2 * n]), py = static_cast<int64_t>(points[2 * n + 1]);
+            const int64_t corner_x = static_cast<int64_t>(static_cast<float>(px) - K / 2.0f + 1);
+            const int64_t corner_y = static_cast<int64_t>(static_cast<float>(py) - K / 2.0f + 1);
+            const int x0 = static_cast<int>(std::clamp<int64_t>(corner_x, 0, width - 1 - K));
+            const int y0 = static_cast<int>(std::clamp<int64_t>(corner_y, 0, height - 1 - K));
+            float *row = patch_rows + n * patch_size;
+            for (int ky = 0; ky < K; ++ky) {
+                for (int kx = 0; kx < K; ++kx) {
+                    features->at(x0 + kx, y0 + ky, feature);
+                    for (int c = 0; c < C; ++c) row[c * K * K + ky * K + kx] = feature[c];
                 }
             }
-        }
-    });
+        });
 
-    // 4. Per-sample projection, SELU, aggregation over positions, L2 normalisation.
-    std::vector<float> projected(samples.size());
-    gemm_transposed(samples.data(), head->sample_weight.data(), projected.data(), count * P, C, C);
-    for (float &value : projected) value = selu(value);
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, count, D, P * C, 1.0f, projected.data(), P * C,
-                head->aggregation.data(), D, 0.0f, descriptors, D);
-    for (int n = 0; n < count; ++n) {
-        float *row = descriptors + static_cast<size_t>(n) * D;
-        const float norm = cblas_snrm2(D, row, 1);
-        const float inverse = 1.0f / std::max(norm, 1e-12f);
-        for (int d = 0; d < D; ++d) row[d] *= inverse;
+        // 2. Offsets: two layers on the patches, then clamped.
+        std::vector<float> hidden(static_cast<size_t>(count) * offsets_size);
+        gemm_transposed(patches.data(), head->offset_weight.data(), hidden.data(), count, offsets_size, patch_size);
+        for (int n = 0; n < count; ++n) {
+            for (int j = 0; j < offsets_size; ++j) {
+                float &value = hidden[static_cast<size_t>(n) * offsets_size + j];
+                value = selu(value + head->offset_bias[j]);
+            }
+        }
+        std::vector<float> offsets(static_cast<size_t>(count) * offsets_size);
+        gemm_transposed(hidden.data(), head->second_weight.data(), offsets.data(), count, offsets_size, offsets_size);
+        const float maximum = static_cast<float>(std::max(width, height)) / 4.0f;
+        for (int n = 0; n < count; ++n) {
+            for (int j = 0; j < offsets_size; ++j) {
+                float &value = offsets[static_cast<size_t>(n) * offsets_size + j];
+                value = std::clamp(value + head->second_bias[j], -maximum, maximum);
+            }
+        }
+
+        // 3. Deformable samples: bilinear on the normalised map, zero outside (grid_sample, align_corners).
+        std::vector<float> samples(static_cast<size_t>(count) * P * C, 0.0f);
+        const float *offset_rows = offsets.data();
+        float *sample_rows = samples.data();
+        dispatch_apply(static_cast<size_t>(count), DISPATCH_APPLY_AUTO, ^(size_t n) {
+            float *feature = scratch_rows + n * C;
+            for (int p = 0; p < P; ++p) {
+                const float ox = offset_rows[n * offsets_size + p], oy = offset_rows[n * offsets_size + P + p];
+                const float gx = 2 * (points[2 * n] + ox) / scale_x - 1, gy = 2 * (points[2 * n + 1] + oy) / scale_y - 1;
+                const float x = (gx + 1) / 2 * scale_x, y = (gy + 1) / 2 * scale_y;
+                if (!std::isfinite(x) || !std::isfinite(y)) continue;
+                const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
+                const float ax = x - static_cast<float>(x0), ay = y - static_cast<float>(y0);
+                float *target = sample_rows + (n * P + p) * C;
+                for (int dy = 0; dy < 2; ++dy) {
+                    for (int dx = 0; dx < 2; ++dx) {
+                        const int xx = x0 + dx, yy = y0 + dy;
+                        if (xx < 0 || yy < 0 || xx >= width || yy >= height) continue;
+                        const float weight = (dx ? ax : 1 - ax) * (dy ? ay : 1 - ay);
+                        features->at(xx, yy, feature);
+                        for (int c = 0; c < C; ++c) target[c] += weight * feature[c];
+                    }
+                }
+            }
+        });
+
+        // 4. Per-sample projection, SELU, aggregation over positions, L2 normalisation.
+        std::vector<float> projected(samples.size());
+        gemm_transposed(samples.data(), head->sample_weight.data(), projected.data(), count * P, C, C);
+        for (float &value : projected) value = selu(value);
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, count, D, P * C, 1.0f, projected.data(), P * C,
+                    head->aggregation.data(), D, 0.0f, descriptors, D);
+        for (int n = 0; n < count; ++n) {
+            float *row = descriptors + static_cast<size_t>(n) * D;
+            const float norm = cblas_snrm2(D, row, 1);
+            const float inverse = 1.0f / std::max(norm, 1e-12f);
+            for (int d = 0; d < D; ++d) row[d] *= inverse;
+        }
+    } catch (const std::exception &e) {
+        // Allocation failures: nothing is thrown across the C API.
+        write_error(error, error_length, e.what());
+        return 1;
     }
     return 0;
 }

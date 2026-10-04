@@ -27,6 +27,14 @@ let package = Package(
                 .unsafeFlags(["-I\(vendor)/include/opencv5"]),
                 // OpenCV's inline headers put __FILE__ into assertion messages: no build-machine paths.
                 .unsafeFlags(["-ffile-prefix-map=\(vendor)/=Vendor/opencv/"]),
+                // SwiftPM builds C++ for release with -Os, which leaves the alignment's loops scalar. At -O2 and
+                // above the loop vectoriser splits a sum of products (s += a * b) into a product and an ordered
+                // sum, which changes its last bit and, through the matcher, a whole analysis: every such sum in
+                // CStitchCore is written with std::fma (align.cpp, descriptor_head.cpp, geometry.cpp), which gives
+                // the bits -Os gave. No fast-math.
+                .unsafeFlags(["-O3"], .when(configuration: .release)),
+                // Debug builds too: unoptimised, the alignment's block Cholesky ran 60 to 130 times slower.
+                .unsafeFlags(["-Os"], .when(configuration: .debug)),
                 .unsafeFlags(["-I\(brew)/include"], .when(traits: onnx)),
                 .define("TESSERA_ONNXRUNTIME", .when(traits: onnx)),
             ],

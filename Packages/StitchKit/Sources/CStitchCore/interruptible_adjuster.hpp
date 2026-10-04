@@ -45,10 +45,17 @@
 // modules/stitching/src/motion_estimators.cpp; calcError, setUpInitialCameraParams and obtainRefinedCameraParams
 // stay OpenCV's compiled code. The only floating-point expressions compiled here are eps * eps, val - step,
 // val + step, 2 * step and (e2 - e1) / h, none of which can be contracted, so the iterates are the same bit for bit.
+//
+// The Jacobian differs in one way: OpenCV evaluated the whole error twice for every parameter of every camera,
+// although moving camera i changes only the rows of the pairs it is in. Here calcError runs on those pairs alone
+// (edges_ and total_num_matches_ narrowed for the call: it computes each pair from its own two cameras), and
+// every other row gets (e - e) / h from one evaluation at the current parameters, which is what the two whole
+// evaluations gave it, NaN included. On 51 photos joined by 65 pairs that is about twenty times less work.
 
 #pragma once
 
 #include <algorithm>
+#include <utility>
 #include <vector>
 
 #include <opencv2/core.hpp>
@@ -167,33 +174,90 @@ private:
     // Before the perturbation of camera `i` of a Jacobian: false after a stop, with nothing perturbed yet.
     bool camera(int i) { return monitor_.poll(fraction(evaluations_ / 2.0 + double(i) / this->num_images_)); }
 
-    static void calcDeriv(const cv::Mat &err1, const cv::Mat &err2, double h, cv::Mat res) {
-        for (int i = 0; i < err1.rows; ++i)
-            res.at<double>(i, 0) = (err2.at<double>(i, 0) - err1.at<double>(i, 0)) / h;
+    // The pairs of each camera, where each pair's rows start in the whole error and how many it has.
+    struct Pairs {
+        std::vector<std::vector<std::pair<int, int>>> edges;
+        std::vector<std::vector<int>> first, rows;
+        std::vector<int> matches;
+    };
+
+    Pairs pairs_of_cameras() const {
+        Pairs pairs;
+        pairs.edges.assign(this->num_images_, {});
+        pairs.first.assign(this->num_images_, {});
+        pairs.rows.assign(this->num_images_, {});
+        pairs.matches.assign(this->num_images_, 0);
+        int row = 0;
+        for (const auto &edge : this->edges_) {
+            // calcError writes num_errs_per_measurement_ rows for each inlier of the pair.
+            const cv::detail::MatchesInfo &info = this->pairwise_matches_[edge.first * this->num_images_ + edge.second];
+            int inliers = 0;
+            for (size_t k = 0; k < info.matches.size(); ++k) inliers += info.inliers_mask[k] ? 1 : 0;
+            for (int camera : {edge.first, edge.second}) {
+                pairs.edges[camera].push_back(edge);
+                pairs.first[camera].push_back(row);
+                pairs.rows[camera].push_back(inliers * this->num_errs_per_measurement_);
+                pairs.matches[camera] += inliers;
+            }
+            row += inliers * this->num_errs_per_measurement_;
+        }
+        return pairs;
+    }
+
+    // calcError on the pairs of `camera` alone, into `err`.
+    void camera_error(const Pairs &pairs, int camera, cv::Mat &err) {
+        std::swap(this->edges_, narrowed_);
+        this->edges_ = pairs.edges[camera];
+        const int total = this->total_num_matches_;
+        this->total_num_matches_ = pairs.matches[camera];
+        struct Restore {
+            Interruptible &self;
+            int total;
+            ~Restore() {
+                std::swap(self.edges_, self.narrowed_);
+                self.total_num_matches_ = total;
+            }
+        } restore{*this, total};
+        AdjusterSteps::error(*this, err);
+    }
+
+    // Column `column` of the Jacobian for cam_params_ entry `param` of `camera`: central differences with `step`.
+    void derivative(cv::Mat &jac, const Pairs &pairs, int camera, int param, int column, double step) {
+        const double val = this->cam_params_.template at<double>(param, 0);
+        this->cam_params_.template at<double>(param, 0) = val - step;
+        camera_error(pairs, camera, before_);
+        this->cam_params_.template at<double>(param, 0) = val + step;
+        camera_error(pairs, camera, after_);
+        this->cam_params_.template at<double>(param, 0) = val;
+        const double h = 2 * step;
+        cv::Mat res = jac.col(column);
+        for (int r = 0; r < current_.rows; ++r)
+            res.at<double>(r, 0) = (current_.at<double>(r, 0) - current_.at<double>(r, 0)) / h;
+        int local = 0;
+        for (size_t e = 0; e < pairs.edges[camera].size(); ++e) {
+            const int start = pairs.first[camera][e];
+            for (int q = 0; q < pairs.rows[camera][e]; ++q, ++local)
+                res.at<double>(start + q, 0) = (after_.at<double>(local, 0) - before_.at<double>(local, 0)) / h;
+        }
     }
 
     Monitor &monitor_;
     int evaluations_ = 0;     // error evaluations without a Jacobian: two per probe with geodesic acceleration
     cv::Mat before_, after_;  // the stock adjusters' err1_ and err2_ are private
+    cv::Mat current_;         // the whole error at the parameters of the Jacobian
+    std::vector<std::pair<int, int>> narrowed_;  // the whole edges_ while calcError runs on one camera's pairs
 };
 
 template <> inline void Interruptible<cv::detail::BundleAdjusterRay>::calcJacobian(cv::Mat &jac) {
     jac.create(this->total_num_matches_ * 3, this->num_images_ * 4, CV_64F);
 
-    double val;
     const double step = 1e-3;
+    const Pairs pairs = pairs_of_cameras();
+    AdjusterSteps::error(*this, current_);
 
     for (int i = 0; i < this->num_images_; ++i) {
         if (!camera(i)) return;
-        for (int j = 0; j < 4; ++j) {
-            val = this->cam_params_.at<double>(i * 4 + j, 0);
-            this->cam_params_.at<double>(i * 4 + j, 0) = val - step;
-            AdjusterSteps::error(*this, before_);
-            this->cam_params_.at<double>(i * 4 + j, 0) = val + step;
-            AdjusterSteps::error(*this, after_);
-            calcDeriv(before_, after_, 2 * step, jac.col(i * 4 + j));
-            this->cam_params_.at<double>(i * 4 + j, 0) = val;
-        }
+        for (int j = 0; j < 4; ++j) derivative(jac, pairs, i, i * 4 + j, i * 4 + j, step);
     }
 }
 
@@ -201,57 +265,18 @@ template <> inline void Interruptible<cv::detail::BundleAdjusterReproj>::calcJac
     jac.create(this->total_num_matches_ * 2, this->num_images_ * 7, CV_64F);
     jac.setTo(0);
 
-    double val;
     const double step = 1e-4;
     const cv::Mat mask = this->refinement_mask_;
+    const Pairs pairs = pairs_of_cameras();
+    AdjusterSteps::error(*this, current_);
 
     for (int i = 0; i < this->num_images_; ++i) {
         if (!camera(i)) return;
-        if (mask.at<uchar>(0, 0)) {
-            val = this->cam_params_.at<double>(i * 7, 0);
-            this->cam_params_.at<double>(i * 7, 0) = val - step;
-            AdjusterSteps::error(*this, before_);
-            this->cam_params_.at<double>(i * 7, 0) = val + step;
-            AdjusterSteps::error(*this, after_);
-            calcDeriv(before_, after_, 2 * step, jac.col(i * 7));
-            this->cam_params_.at<double>(i * 7, 0) = val;
-        }
-        if (mask.at<uchar>(0, 2)) {
-            val = this->cam_params_.at<double>(i * 7 + 1, 0);
-            this->cam_params_.at<double>(i * 7 + 1, 0) = val - step;
-            AdjusterSteps::error(*this, before_);
-            this->cam_params_.at<double>(i * 7 + 1, 0) = val + step;
-            AdjusterSteps::error(*this, after_);
-            calcDeriv(before_, after_, 2 * step, jac.col(i * 7 + 1));
-            this->cam_params_.at<double>(i * 7 + 1, 0) = val;
-        }
-        if (mask.at<uchar>(1, 2)) {
-            val = this->cam_params_.at<double>(i * 7 + 2, 0);
-            this->cam_params_.at<double>(i * 7 + 2, 0) = val - step;
-            AdjusterSteps::error(*this, before_);
-            this->cam_params_.at<double>(i * 7 + 2, 0) = val + step;
-            AdjusterSteps::error(*this, after_);
-            calcDeriv(before_, after_, 2 * step, jac.col(i * 7 + 2));
-            this->cam_params_.at<double>(i * 7 + 2, 0) = val;
-        }
-        if (mask.at<uchar>(1, 1)) {
-            val = this->cam_params_.at<double>(i * 7 + 3, 0);
-            this->cam_params_.at<double>(i * 7 + 3, 0) = val - step;
-            AdjusterSteps::error(*this, before_);
-            this->cam_params_.at<double>(i * 7 + 3, 0) = val + step;
-            AdjusterSteps::error(*this, after_);
-            calcDeriv(before_, after_, 2 * step, jac.col(i * 7 + 3));
-            this->cam_params_.at<double>(i * 7 + 3, 0) = val;
-        }
-        for (int j = 4; j < 7; ++j) {
-            val = this->cam_params_.at<double>(i * 7 + j, 0);
-            this->cam_params_.at<double>(i * 7 + j, 0) = val - step;
-            AdjusterSteps::error(*this, before_);
-            this->cam_params_.at<double>(i * 7 + j, 0) = val + step;
-            AdjusterSteps::error(*this, after_);
-            calcDeriv(before_, after_, 2 * step, jac.col(i * 7 + j));
-            this->cam_params_.at<double>(i * 7 + j, 0) = val;
-        }
+        if (mask.at<uchar>(0, 0)) derivative(jac, pairs, i, i * 7, i * 7, step);
+        if (mask.at<uchar>(0, 2)) derivative(jac, pairs, i, i * 7 + 1, i * 7 + 1, step);
+        if (mask.at<uchar>(1, 2)) derivative(jac, pairs, i, i * 7 + 2, i * 7 + 2, step);
+        if (mask.at<uchar>(1, 1)) derivative(jac, pairs, i, i * 7 + 3, i * 7 + 3, step);
+        for (int j = 4; j < 7; ++j) derivative(jac, pairs, i, i * 7 + j, i * 7 + j, step);
     }
 }
 

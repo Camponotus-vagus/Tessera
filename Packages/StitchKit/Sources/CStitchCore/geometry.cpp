@@ -144,8 +144,9 @@ extern "C" sc_fit sc_fit_model(const float *points_a, const float *points_b, int
             return sc_fit{};
         }
         double sum_squares = 0;
+        // std::fma, as in descriptor_head.cpp: the same bits at every optimisation level.
         for (double e : errors) {
-            sum_squares += e * e;
+            sum_squares = std::fma(e, e, sum_squares);
         }
         std::nth_element(errors.begin(), errors.begin() + errors.size() / 2, errors.end());
         fit.ok = 1;

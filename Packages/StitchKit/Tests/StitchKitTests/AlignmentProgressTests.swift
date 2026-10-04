@@ -128,13 +128,11 @@ struct AlignmentProgressTests {
 
     @Test("Monitored and unmonitored solves give the same results")
     func identical() throws {
-        // Accelerate's sparse Cholesky, which the planar models use, sums in a different order from run to run
-        // when it uses several threads: their results agree to 1e-9 here, bit for bit with VECLIB_MAXIMUM_THREADS=1.
         let grid = Self.grid()
         for model in [GlobalModel.translation, .similarity, .affine, .homography] {
             let plain = try Aligner.solve(model, grid, anchor: 19, monitored: false)
             let watched = try Aligner.solve(model, grid, anchor: 19)
-            #expect(Self.difference(plain, watched) < 1e-9, "\(model): \(Self.difference(plain, watched))")
+            #expect(Self.bits(plain) == Self.bits(watched), "\(model): \(Self.difference(plain, watched))")
         }
         // The ray adjustment with wave correction, with its refit, then the fixed-focal fallback: bit for bit.
         for (problem, method) in [(Self.ring(count: 24), 0), (Self.movingRing(count: 12), 0),
@@ -143,6 +141,21 @@ struct AlignmentProgressTests {
             let watched = try Aligner.solve(.rotation, problem, anchor: 0)
             #expect(plain.method == Int32(method))
             #expect(Self.bits(plain) == Self.bits(watched), "rotation, method \(method)")
+        }
+    }
+
+    @Test("Planar solves repeated, also on several threads at once, give the same bits")
+    func repeatable() async throws {
+        // Accelerate's sparse Cholesky summed in a different order from run to run: 6 solves of the grid gave
+        // up to 6 different affine and homography results.
+        let grid = Self.grid()
+        for model in [GlobalModel.translation, .similarity, .affine, .homography] {
+            let first = Self.bits(try Aligner.solve(model, grid, anchor: 19, monitored: false))
+            let others = try await withThrowingTaskGroup(of: [UInt64].self) { group in
+                for _ in 0..<6 { group.addTask { Self.bits(try Aligner.solve(model, grid, anchor: 19, monitored: false)) } }
+                return try await group.reduce(into: [[UInt64]]()) { $0.append($1) }
+            }
+            #expect(others.allSatisfy { $0 == first }, "\(model)")
         }
     }
 
