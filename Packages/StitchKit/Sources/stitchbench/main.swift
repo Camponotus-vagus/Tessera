@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import StitchKit
+import Synchronization
 
 // Command-line driver for the diagnostic pipeline: timings, a text summary,
 // and optionally the JSON report plus one PNG per pair.
@@ -19,6 +20,7 @@ struct Options {
     var loadReport: URL?
     var modeGiven = false
     var exact = false
+    var stages = false
     var repeats = 1
     var files: [URL] = []
 }
@@ -32,7 +34,7 @@ func usage(_ problem: String? = nil) -> Never {
                        [--low-memory] [--onnx-select] [--align] [--repeat N]
                        [--stitch file.jpg|png|tif|heic] [--projection automatic|flat|rectilinear|cylindrical|spherical]
                        [--scale 0.5] [--original-pixels] [--exposure channels|blocks|none] [--crop|--no-crop] [--out dir]
-                       [--save-report file.json] [--exact] images...
+                       [--save-report file.json] [--exact] [--stages] images...
            stitchbench --load-report file.json [--mode ...] [--align] [--stitch file] ...
            stitchbench --download-models [images...]
     """)
@@ -116,6 +118,7 @@ func parse() -> Options {
         case "--save-report": options.saveReport = URL(fileURLWithPath: value(argument))
         case "--load-report": options.loadReport = URL(fileURLWithPath: value(argument))
         case "--exact": options.exact = true
+        case "--stages": options.stages = true
         case "-h", "--help": usage()
         case let option where option.hasPrefix("--"): usage("unknown option \(option)")
         default: options.files.append(URL(fileURLWithPath: argument))
@@ -202,10 +205,14 @@ func run() async throws {
     }
     for run in 1...options.repeats where options.loadReport == nil {
         let start = ContinuousClock.now
-        report = try await engine.analyze(urls: options.files, configuration: options.configuration)
+        let timeline = StageTimeline(start: start)
+        var progress: (@Sendable (ProgressEvent) -> Void)?
+        if options.stages { progress = { timeline.record($0) } }
+        report = try await engine.analyze(urls: options.files, configuration: options.configuration, progress: progress)
         let elapsed = ContinuousClock.now - start
         print("run \(run): \(elapsed.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow))), " +
               "peak RSS \(format(peakResidentMegabytes(), 0)) MB")
+        if options.stages { timeline.print() }
     }
     guard let report else { exit(1) }
     if let file = options.saveReport { try report.jsonData().write(to: file) }
@@ -330,4 +337,30 @@ do {
 } catch {
     FileHandle.standardError.write(Data("stitchbench: \(error.localizedDescription)\n".utf8))
     exit(1)
+}
+
+/// --stages: when each stage of the analysis first and last reported, in seconds from the start.
+final class StageTimeline: Sendable {
+    private let start: ContinuousClock.Instant
+    private let spans = Mutex<[String: (first: Double, last: Double, order: Int)]>([:])
+
+    init(start: ContinuousClock.Instant) { self.start = start }
+
+    func record(_ event: ProgressEvent) {
+        let now = (ContinuousClock.now - start) / .seconds(1)
+        spans.withLock { spans in
+            if let span = spans[event.stage] {
+                spans[event.stage] = (span.first, now, span.order)
+            } else {
+                spans[event.stage] = (now, now, spans.count)
+            }
+        }
+    }
+
+    func print() {
+        for (stage, span) in spans.withLock({ $0 }).sorted(by: { $0.value.order < $1.value.order }) {
+            Swift.print("  stage \(stage.padding(toLength: 18, withPad: " ", startingAt: 0)) " +
+                        "\(String(format: "%7.2f", span.first)) - \(String(format: "%7.2f", span.last)) s")
+        }
+    }
 }

@@ -122,6 +122,7 @@ extension ProgressEvent {
         case "affinity": String(localized: "Choosing pairs")
         case "sift-match": String(localized: "RootSIFT matching")
         case "lightglue-match", "lightglue-early": String(localized: "LightGlue matching")
+        case "match": String(localized: "Matching the pairs")
         case "verify": String(localized: "Geometric verification")
         case "bridge": String(localized: "Pairs between separate groups")
         case "overlap": String(localized: "Pairs the layout predicts")

@@ -9,6 +9,13 @@ public struct ProgressEvent: Sendable, Equatable {
     public var total: Int
     /// Share of the stage done, for stages that measure work instead of counting items (align, layout).
     public var fraction: Double? = nil
+
+    public init(stage: String, completed: Int, total: Int, fraction: Double? = nil) {
+        self.stage = stage
+        self.completed = completed
+        self.total = total
+        self.fraction = fraction
+    }
 }
 
 /// Owns a native SIFT feature set.
@@ -96,15 +103,15 @@ public actor StitchEngine {
         // 3-4. Matching and geometric verification, only on the candidates.
         func examine(_ chosen: [CandidatePair], learnedAlready: [PairEvidence] = []) async throws -> [PairEvidence] {
             let pairs = chosen.compactMap { pair in lookup[pair.a].flatMap { a in lookup[pair.b].map { (a, $0) } } }
-            var evidence: [PairEvidence] = []
-            if !sift.isEmpty {
-                evidence += try await matchSIFT(pairs, sift, configuration, progress)
-            }
+            // RootSIFT on the CPU cores and LightGlue on the GPU at the same time, in the same order as one after
+            // the other.
+            async let siftEvidence = sift.isEmpty ? [] : Self.matchSIFT(pairs, sift, configuration, progress)
+            var learnedEvidence: [PairEvidence] = []
             if let session {
                 let remaining = pairs.filter { !matchedEarly.contains(PairProposal.Key($0.0.id, $0.1.id)) }
-                evidence += learnedAlready
-                evidence += try await matchLearned(remaining, learned, session, configuration, progress)
+                learnedEvidence = try await learnedAlready + Self.matchLearned(remaining, learned, session, configuration, progress)
             }
+            let evidence = try await siftEvidence + learnedEvidence
             try Task.checkCancellation()
             progress?(ProgressEvent(stage: "verify", completed: 0, total: evidence.count))
             let verified = await Self.verifyAll(evidence, images: images, configuration: configuration, progress: progress)
@@ -290,7 +297,7 @@ public actor StitchEngine {
         _ progress: (@Sendable (ProgressEvent) -> Void)?
     ) async throws -> ([Int: (SIFTFeatures, ImageFeatures)], Set<Int>) {
         try await withThrowingTaskGroup(of: (Int, (SIFTFeatures, ImageFeatures)?).self) { group in
-            for image in images {
+            func start(_ image: SourceImage) {
                 group.addTask {
                     try Task.checkCancellation()
                     do {
@@ -301,32 +308,46 @@ public actor StitchEngine {
                     }
                 }
             }
+            // As many photos at a time as there are cores: with all of them queued at once, the learned
+            // extractor's next photo and the early LightGlue matches waited behind the last of them.
+            var pending = images.makeIterator()
+            for _ in 0..<cpuWindow {
+                guard let image = pending.next() else { break }
+                start(image)
+            }
             var results: [Int: (SIFTFeatures, ImageFeatures)] = [:]
             var failed = Set<Int>()
             for try await (id, result) in group {
                 if let result { results[id] = result } else { failed.insert(id) }
                 progress?(ProgressEvent(stage: "sift", completed: results.count + failed.count, total: images.count))
+                if let image = pending.next() { start(image) }
             }
             return (results, failed)
         }
     }
 
-    private func matchSIFT(
+    private nonisolated static func matchSIFT(
         _ pairs: [(SourceImage, SourceImage)], _ extracted: [Int: (SIFTFeatures, ImageFeatures)],
         _ configuration: PipelineConfiguration, _ progress: (@Sendable (ProgressEvent) -> Void)?
     ) async throws -> [PairEvidence] {
         let evidence = try await withThrowingTaskGroup(of: PairEvidence.self) { group in
-            for (a, b) in pairs {
-                guard let (handleA, _) = extracted[a.id], let (handleB, _) = extracted[b.id] else { continue }
+            var pending = pairs.lazy.compactMap { a, b -> (Int, SIFTFeatures, Int, SIFTFeatures)? in
+                guard let (handleA, _) = extracted[a.id], let (handleB, _) = extracted[b.id] else { return nil }
+                return (a.id, handleA, b.id, handleB)
+            }.makeIterator()
+            func start() {
+                guard let (a, handleA, b, handleB) = pending.next() else { return }
                 group.addTask {
                     try Task.checkCancellation()
-                    return try Self.matchSIFT(a.id, handleA, b.id, handleB, configuration)
+                    return try Self.matchSIFT(a, handleA, b, handleB, configuration)
                 }
             }
+            for _ in 0..<cpuWindow { start() }
             var results: [PairEvidence] = []
             for try await item in group {
                 results.append(item)
                 progress?(ProgressEvent(stage: "sift-match", completed: results.count, total: pairs.count))
+                start()
             }
             return results
         }
@@ -537,15 +558,15 @@ public actor StitchEngine {
         for await (a, b) in pairs {
             guard let session else { continue }
             try Task.checkCancellation()
-            evidence.append(try await Task.detached(priority: .userInitiated) {
+            evidence.append(try await onMatcherQueue {
                 try Self.matchLearned(a, b, session, threshold: configuration.matchThreshold)
-            }.value)
+            })
             progress?(ProgressEvent(stage: "lightglue-early", completed: evidence.count, total: total))
         }
         return evidence
     }
 
-    private func matchLearned(
+    private nonisolated static func matchLearned(
         _ pairs: [(SourceImage, SourceImage)], _ extractions: [Int: Extraction], _ session: LearnedSession,
         _ configuration: PipelineConfiguration, _ progress: (@Sendable (ProgressEvent) -> Void)?
     ) async throws -> [PairEvidence] {
@@ -553,12 +574,25 @@ public actor StitchEngine {
         for (index, (a, b)) in pairs.enumerated() {
             guard let ea = extractions[a.id], let eb = extractions[b.id] else { continue }
             try Task.checkCancellation()
-            evidence.append(try await Task.detached(priority: .userInitiated) {
+            evidence.append(try await onMatcherQueue {
                 try Self.matchLearned(ea, eb, session, threshold: configuration.matchThreshold)
-            }.value)
+            })
             progress?(ProgressEvent(stage: "lightglue-match", completed: index + 1, total: pairs.count))
         }
         return evidence
+    }
+
+    /// Tasks the CPU stages keep in flight: one per core.
+    nonisolated static var cpuWindow: Int { max(2, ProcessInfo.processInfo.activeProcessorCount) }
+
+    /// LightGlue's predictions run one at a time on their own thread, so that the GPU does not wait for a
+    /// thread of the cooperative pool while RootSIFT keeps every core busy.
+    private nonisolated static let matcherQueue = DispatchQueue(label: "Tessera.matcher", qos: .userInitiated)
+
+    private nonisolated static func onMatcherQueue<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            matcherQueue.async { continuation.resume(with: Result { try body() }) }
+        }
     }
 
     private nonisolated static func extract(_ image: SourceImage, _ session: LearnedSession) throws -> Extraction {

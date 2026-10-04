@@ -97,8 +97,9 @@ final class DiagnosticSession {
     /// Share of the current stage done, when it is known; it never goes back within a stage.
     private(set) var displayFraction: Double?
     private var phase: String?
-    /// The latest event of each extractor, which run side by side, and how many run.
-    private var extraction: [String: ProgressEvent] = [:]
+    /// The latest event of each stage of a phase whose stages run side by side (the extractors, the matchers),
+    /// and how many extractors and matchers run.
+    private var combined: [String: ProgressEvent] = [:]
     private var extractors = 1
     private(set) var isExporting = false
     private(set) var lastExport: URL?
@@ -241,24 +242,29 @@ final class DiagnosticSession {
     /// Shows the events of the current run, unless it was stopped or replaced.
     private func apply(_ events: [ProgressEvent], _ stream: Stream, _ generation: Int) {
         guard generation == self.generation, !isStopping, stream == .analysis ? isRunning : isStitching else { return }
-        for event in events {
+        for var event in events {
             // The two extractors run side by side with LightGlue's matching of the pairs compared in any case
-            // (consecutive shots, or every pair): one phase.
+            // (consecutive shots, or every pair), and the two matchers side by side: one phase each.
             let extracting = ["sift", "lightglue-extract", "lightglue-early"].contains(event.stage)
-            let phase = extracting ? "features" : event.stage
+            let matching = ["sift-match", "lightglue-match"].contains(event.stage)
+            let phase = extracting ? "features" : matching ? "match" : event.stage
             if phase != self.phase {
                 self.phase = phase
                 displayFraction = nil
-                extraction = [:]
+                combined = [:]
             }
             var fraction = event.fraction ?? (event.total > 0 ? Double(event.completed) / Double(event.total) : nil)
-            if extracting {
-                // Counted against every extractor from the start, so that a fast one does not fill the bar alone.
-                extraction[event.stage] = event
-                let started = extraction.keys.filter { $0 != "lightglue-early" }.count
-                let photos = extraction.values.first { $0.stage != "lightglue-early" }?.total ?? 0
-                let total = extraction.values.reduce(0) { $0 + $1.total } + max(0, extractors - started) * photos
-                fraction = total > 0 ? Double(extraction.values.reduce(0) { $0 + $1.completed }) / Double(total) : nil
+            if extracting || matching {
+                // Counted against every extractor or matcher from the start, so that a fast one does not fill
+                // the bar alone.
+                combined[event.stage] = event
+                let started = combined.keys.filter { $0 != "lightglue-early" }.count
+                let each = combined.values.first { $0.stage != "lightglue-early" }?.total ?? 0
+                let total = combined.values.reduce(0) { $0 + $1.total } + max(0, extractors - started) * each
+                let completed = combined.values.reduce(0) { $0 + $1.completed }
+                fraction = total > 0 ? Double(completed) / Double(total) : nil
+                // One count for both matchers, which report in turn.
+                if matching { event = ProgressEvent(stage: "match", completed: completed, total: total) }
             }
             if let fraction { displayFraction = max(displayFraction ?? 0, min(fraction, 1)) }
             switch stream {
