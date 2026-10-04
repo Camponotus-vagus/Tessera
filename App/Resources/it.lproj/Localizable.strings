@@ -211,6 +211,7 @@
 "%lld pairs were left out of the alignment because they disagree with the others" = "%lld coppie sono state escluse dall'allineamento perché in disaccordo con le altre";
 "%lld photos are not in the panorama: %@" = "%lld foto non sono nel panorama: %@";
 "Panorama View" = "Vista Panorama";
+"OK" = "OK";
 
 /* Engine notes and errors (StitchKit) */
 "The pair %@ ↔ %@ was left out of the alignment (%.1f px off the others)" = "La coppia %@ ↔ %@ è stata esclusa dall'allineamento (%.1f px di scarto rispetto alle altre)";

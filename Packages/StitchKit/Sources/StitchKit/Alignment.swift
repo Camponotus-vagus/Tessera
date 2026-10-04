@@ -201,7 +201,7 @@ struct AlignmentProblem: Sendable {
             let p = index[PairProposal.Key(x, y)]!
             return pairs[p].a == x ? maps[p] : maps[p].inverse
         }
-        // Up to 16 matches of the pair x-y, as (point in x, point in y).
+        // The matches of the pair x-y, thinned evenly to 16-31 when there are more, as (point in x, point in y).
         func matches(_ x: Int, _ y: Int) -> [(SIMD2<Double>, SIMD2<Double>)] {
             let pair = pairs[index[PairProposal.Key(x, y)]!]
             let step = max(1, pair.count / 16)

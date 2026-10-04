@@ -40,7 +40,7 @@ Tessera works right away with RootSIFT, the classical matcher. The learned match
 2. Click Stitch (⇧⌘R). Tessera analyses the photos, aligns the largest group of connected photos and blends it into one image, which appears in the Panorama view (⌘3). Photo outlines draws where each photo landed, and Crop to a rectangle keeps the largest rectangle without empty corners.
 3. Click Export… above the panorama, or choose File > Export Panorama… (⌘E). JPEG and HEIC have a quality setting. PNG and TIFF can keep 16 bits per channel and, when the panorama is not cropped, a transparent background around it.
 
-If some photos are left out, the Graph view (⌘1) says why for each of them. Clicking an edge opens the Pair view (⌘2) with the matches between those two photos, and Analyze (⌘R) runs only this part, without stitching.
+If some photos are left out, the Graph view (⌘1) says why for each of them; photos that the alignment leaves out are listed with the reason under the panorama. Clicking an edge opens the Pair view (⌘2) with the matches between those two photos, and Analyze (⌘R) runs only this part, without stitching.
 
 The settings inspector has, among others:
 
@@ -82,11 +82,11 @@ ONNX Runtime is optional. With `brew install onnxruntime` and `TESSERA_TRAITS=on
 ## How it works
 
 1. Features: RootSIFT runs on the CPU while RaCo-ALIKED runs on the GPU. The learned extractor is split in three: Core ML computes RaCo's score and ranker maps and ALIKED's feature levels, C++ selects the keypoints, and a small C++ routine evaluates ALIKED's descriptor head only at the pixels it needs.
-2. Candidate pairs: with more than four photos, a mutual-nearest-neighbour count between the best 512 descriptors of each photo ranks the pairs, and Tessera matches consecutive shots, the best neighbours of each photo and a spanning tree, then retries promising pairs between groups that remain apart.
+2. Candidate pairs: with more than four photos, a mutual-nearest-neighbour count between the best 512 descriptors of each photo ranks the pairs, and Tessera matches consecutive shots, the best neighbours of each photo and a spanning tree, then retries promising pairs between groups that remain apart. With more than eight photos it also matches the pairs that overlap in a provisional layout of the photos.
 3. Matching: RootSIFT with Lowe's ratio test and a mutual check, computed as one matrix product with Accelerate; LightGlue on Core ML.
 4. Verification: RANSAC for translation and similarity and MAGSAC++ (OpenCV USAC) for affine and homography, then an a-contrario test (number of false alarms), a check that the inliers cover more than a strip, and a plausibility check on the transform.
 5. Graph: connected groups of verified pairs, with a reason for every photo left out.
-6. Global alignment: planar mosaics are solved by weighted least squares on the inliers of all verified pairs (translation, similarity or affine), or by Levenberg-Marquardt for homographies. Rotation panoramas use OpenCV's bundle adjuster, starting from the EXIF focal length when every photo has one, and wave correction to level the horizon. Pairs that disagree with the rest are dropped while the group stays connected.
+6. Global alignment: planar mosaics are solved by weighted least squares on the inliers of all verified pairs (translation, similarity or affine), or by Levenberg-Marquardt for homographies. Rotation panoramas use OpenCV's bundle adjuster, starting from the EXIF focal length when every photo has one, and wave correction to level the horizon. Pairs whose loops of three photos do not close are left out first, with any photo that only they join; after solving, pairs that disagree with the rest are dropped while the group stays connected. In Automatic mode, sets of 40 photos or more can also leave out up to 5% of their photos when the homographies place them implausibly.
 7. Compositing: each photo is warped to the chosen projection, exposure is compensated per photo and colour channel, a graph cut places the seams around objects, and multi-band blending hides them. The result keeps 16 bits per channel, and its largest rectangle without empty corners is found exactly up to 60 megapixels.
 
 More detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Timings on an M5 MacBook Air are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md): six 12-megapixel photos are analysed in about a second and stitched in about two more.
