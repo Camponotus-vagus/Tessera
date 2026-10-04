@@ -288,7 +288,10 @@ func run() async throws {
 
     if let file = options.stitch {
         let start = ContinuousClock.now
+        let timeline = StageTimeline(start: start)
+        let showStages = options.stages
         let panorama = try await engine.stitch(report, request: options.request) { event in
+            if showStages { timeline.record(event) }
             if let fraction = event.fraction {
                 FileHandle.standardError.write(Data("\r\(event.stage) \(Int(fraction * 100))%   ".utf8))
             } else if event.total > 0 {
@@ -296,6 +299,7 @@ func run() async throws {
             }
         }
         FileHandle.standardError.write(Data("\r".utf8))
+        if options.stages { timeline.print() }
         let crop = (options.crop ?? panorama.cropsByDefault) && !panorama.crop.isEmpty ? panorama.crop : nil
         let fileFormat = PanoramaFormat.allCases.first { $0.fileExtension == file.pathExtension.lowercased() }
             ?? (file.pathExtension.lowercased() == "jpeg" ? .jpeg : file.pathExtension.lowercased() == "tiff" ? .tiff : .png)
@@ -339,7 +343,7 @@ do {
     exit(1)
 }
 
-/// --stages: when each stage of the analysis first and last reported, in seconds from the start.
+/// --stages: when each stage of the analysis or the stitch first and last reported, in seconds from the start.
 final class StageTimeline: Sendable {
     private let start: ContinuousClock.Instant
     private let spans = Mutex<[String: (first: Double, last: Double, order: Int)]>([:])
