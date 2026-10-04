@@ -12,7 +12,7 @@
 | `tools/export` | scripts that turn the PyTorch weights into the Core ML and ONNX models |
 | `tools/build-opencv.sh` | builds the static OpenCV in `Vendor/opencv` (core, imgproc, features, flann, geometry, stitching) |
 
-Swift never sees C++ types. Everything crosses the boundary as flat float arrays and small C structs, and every native handle (SIFT features, ONNX sessions, the descriptor head) is owned by a Swift class that frees it in `deinit`. `StitchEngine` is an actor; the per-photo and per-pair work runs in task groups and detached tasks, and Core ML predictions on the dense extractor are serialised by a lock so the GPU runs one at a time while the CPU stages of other photos proceed.
+Swift never sees C++ types. Everything crosses the boundary as flat float arrays and small C structs, and every native handle (SIFT features, ONNX sessions, the descriptor head) is owned by a Swift class that frees it in `deinit`. `StitchEngine` is an actor; the per-photo and per-pair work runs in task groups, with one task per core for RootSIFT, LightGlue's predictions run one at a time on a serial dispatch queue, and Core ML predictions on the dense extractor are serialised by a lock so the GPU runs one at a time while the CPU stages of other photos proceed.
 
 ## Pipeline
 
