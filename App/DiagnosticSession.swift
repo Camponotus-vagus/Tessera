@@ -185,6 +185,7 @@ final class DiagnosticSession {
     private func extractFrames(_ videos: [URL], then: (@MainActor () -> Void)?) {
         let generation = generation
         isRunning = true
+        let relay = ProgressRelay { [weak self] events in self?.apply(events, .analysis, generation) }
         analysis = Task {
             defer {
                 if generation == self.generation {
@@ -196,7 +197,6 @@ final class DiagnosticSession {
                     analysis = nil
                 }
             }
-            let relay = ProgressRelay { [weak self] events in self?.apply(events, .analysis, generation) }
             do {
                 for video in videos {
                     // Detached: the extraction reads and measures every frame on the calling thread.
