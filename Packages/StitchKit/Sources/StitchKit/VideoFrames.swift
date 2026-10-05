@@ -79,8 +79,11 @@ public enum VideoFrames {
             return cg
         }
         func write(_ frame: (index: Int, time: Double, image: CGImage)) throws {
-            let number = String(repeating: "0", count: max(0, digits - String(frame.index).count)) + String(frame.index)
-            let name = "\(stem)_f\(number)_\(String(format: "%06.2f", locale: Locale(identifier: "en_US_POSIX"), frame.time))s.jpg"
+            func padded(_ value: Int, _ width: Int) -> String {
+                String(repeating: "0", count: max(0, width - String(value).count)) + String(value)
+            }
+            let hundredths = max(0, Int((frame.time * 100).rounded()))
+            let name = "\(stem)_f\(padded(frame.index, digits))_\(padded(hundredths / 100, 3)).\(padded(hundredths % 100, 2))s.jpg"
             let url = folder.appendingPathComponent(name)
             guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
             else { throw StitchError.engine("cannot write \(name)") }

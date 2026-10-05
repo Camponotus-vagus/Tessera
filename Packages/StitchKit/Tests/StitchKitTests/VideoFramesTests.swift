@@ -110,6 +110,8 @@ struct VideoFramesTests {
             Int(name.lastPathComponent.firstMatch(of: /_f(\d+)_/)!.1)!
         }
         #expect(numbers.first == 0)
+        // Zero-padded frame number and time, as in "pan_f0000_000.00s.jpg".
+        #expect(frames.allSatisfy { $0.lastPathComponent.wholeMatch(of: /pan_f\d{4}_\d{3}\.\d{2}s\.jpg/) != nil })
         #expect(numbers == numbers.sorted())
         // A third of a frame is about 27 frames at 1/80 of a frame each; never more apart than that.
         for (a, b) in zip(numbers, numbers.dropFirst()) { #expect(b - a >= 13 && b - a <= 28, "frames \(a) and \(b)") }
