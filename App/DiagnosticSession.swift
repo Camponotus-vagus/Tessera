@@ -165,7 +165,61 @@ final class DiagnosticSession {
         return report.images.map(\.url) == images.map(\.url) && Set(report.excludedByUser) == excluded
     }
 
-    func add(_ urls: [URL]) {
+    /// Adds photos, and the frames chosen from each video among `urls`. `then` runs once the photos and the
+    /// frames are in (not when the frames were stopped or could not be read).
+    func add(_ urls: [URL], then: (@MainActor () -> Void)? = nil) {
+        let videos = urls.filter(VideoFrames.isVideo)
+        addPhotos(urls.filter { !VideoFrames.isVideo($0) })
+        guard !videos.isEmpty else {
+            then?()
+            return
+        }
+        guard !isBusy else {
+            errorMessage = String(localized: "A video can be added when the work in progress has ended.")
+            return
+        }
+        extractFrames(videos, then: then)
+    }
+
+    /// Chooses the sharpest frames of each video, a third of a frame apart, and adds them as photos.
+    private func extractFrames(_ videos: [URL], then: (@MainActor () -> Void)?) {
+        let generation = generation
+        isRunning = true
+        analysis = Task {
+            defer {
+                if generation == self.generation {
+                    isRunning = false
+                    isStopping = false
+                    progress = nil
+                    displayFraction = nil
+                    phase = nil
+                    analysis = nil
+                }
+            }
+            let relay = ProgressRelay { [weak self] events in self?.apply(events, .analysis, generation) }
+            do {
+                for video in videos {
+                    // Detached: the extraction reads and measures every frame on the calling thread.
+                    let frames = try await Task.detached(priority: .userInitiated) {
+                        try await VideoFrames.extract(video: video) { relay.send($0) }
+                    }.value
+                    try Task.checkCancellation()
+                    guard generation == self.generation else { return }
+                    addPhotos(frames)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                if generation == self.generation { errorMessage = error.localizedDescription }
+                return
+            }
+            guard generation == self.generation, let then else { return }
+            // After this task has ended and the session is no longer busy.
+            Task { then() }
+        }
+    }
+
+    private func addPhotos(_ urls: [URL]) {
         var known = Set(images.map(\.url))
         var failed: [String] = []
         for url in urls where !known.contains(url) {

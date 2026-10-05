@@ -15,7 +15,7 @@
 
 /* Empty states and status */
 "No photos" = "Nessuna foto";
-"Drop the photos to join here, or import them." = "Trascina qui le foto da unire, oppure importale.";
+"Drop the photos to join here, or a video swept over the subject, or import them." = "Trascina qui le foto da unire, o un video che percorre il soggetto, oppure importali.";
 "Import Photos…" = "Importa foto…";
 "Needs a new analysis" = "Da rianalizzare";
 "Analysing…" = "Analisi in corso…";
@@ -143,6 +143,10 @@
 "excluded" = "esclusa";
 "Automatic (Core ML)" = "Automatico (Core ML)";
 "These files could not be read and were not added: %@" = "Questi file non si leggono e non sono stati aggiunti: %@";
+"A video can be added when the work in progress has ended." = "Un video si può aggiungere quando il lavoro in corso è finito.";
+"Reading the video…" = "Lettura del video…";
+"Choosing video frames" = "Scelta dei fotogrammi";
+"%@ has no video track" = "%@ non contiene una traccia video";
 "Turn on at least one matcher." = "Attiva almeno un matcher.";
 "Stop" = "Interrompi";
 "Stopping…" = "Interruzione in corso…";

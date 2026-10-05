@@ -51,7 +51,7 @@ Tessera works right away with RootSIFT, the classical matcher. The learned match
 
 ## Using it
 
-1. Drop the photos on the window, or click Import Photos.
+1. Drop the photos on the window, or click Import Photos. A video swept over the subject works too: Tessera reads every frame and keeps the sharpest one in each step of a third of a frame (frames are kept in `~/Library/Caches/Tessera/Frames`, so a second import of the same video is immediate).
 2. Click Stitch (⇧⌘R). Tessera analyses the photos, aligns the largest group of connected photos and blends it into one image, which appears in the Panorama view (⌘3). Photo outlines draws where each photo landed, and Crop to a rectangle keeps the largest rectangle without empty corners.
 3. Click Export… above the panorama, or choose File > Export Panorama… (⌘E). JPEG and HEIC have a quality setting. PNG and TIFF can keep 16 bits per channel and, when the panorama is not cropped, a transparent background around it.
 
@@ -75,7 +75,7 @@ swift build -c release
 .build/release/stitchbench --stitch /tmp/panorama.tif --projection cylindrical path/to/photos/*.jpg
 ```
 
-`stitchbench --download-models` installs the learned models in the same place as the app.
+`stitchbench --download-models` installs the learned models in the same place as the app. Given a single video, `stitchbench` chooses its frames as the app does (`--frames dir` writes them there instead of the caches).
 
 ## Building from source
 

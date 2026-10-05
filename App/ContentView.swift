@@ -16,7 +16,10 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(260)
         } detail: {
             Group {
-                if session.images.isEmpty {
+                if session.images.isEmpty && session.isRunning {
+                    // Frames being chosen from a video.
+                    ProgressCard(fallback: String(localized: "Reading the video…"))
+                } else if session.images.isEmpty {
                     EmptyState(importing: $importing)
                 } else if session.report == nil && session.tab != .panorama && session.isRunning {
                     // A first analysis: the large bar, until the graph has something to show.
@@ -89,7 +92,7 @@ struct ContentView: View {
                 Button("Settings", systemImage: "sidebar.trailing") { showInspector.toggle() }
             }
         }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
+        .fileImporter(isPresented: $importing, allowedContentTypes: [.image, .movie], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { session.add(urls) }
         }
         .fileExporter(
@@ -99,9 +102,11 @@ struct ContentView: View {
             if case .failure(let error) = result { session.errorMessage = error.localizedDescription }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            let images = urls.filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
-            session.add(images)
-            return !images.isEmpty
+            let files = urls.filter {
+                UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true || VideoFrames.isVideo($0)
+            }
+            session.add(files)
+            return !files.isEmpty
         }
         .alert("Error", isPresented: Binding(
             get: { session.errorMessage != nil }, set: { if !$0 { session.errorMessage = nil } }
@@ -121,7 +126,7 @@ private struct EmptyState: View {
         ContentUnavailableView {
             Label("No photos", systemImage: "photo.on.rectangle.angled")
         } description: {
-            Text("Drop the photos to join here, or import them.")
+            Text("Drop the photos to join here, or a video swept over the subject, or import them.")
         } actions: {
             VStack(spacing: 16) {
                 Button("Import Photos…") { importing = true }

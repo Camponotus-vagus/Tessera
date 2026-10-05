@@ -23,6 +23,8 @@ struct Options {
     var stages = false
     var repeats = 1
     var files: [URL] = []
+    /// --frames: where the frames chosen from a video go (default: Tessera's caches).
+    var frames: URL?
 }
 
 func usage(_ problem: String? = nil) -> Never {
@@ -35,6 +37,7 @@ func usage(_ problem: String? = nil) -> Never {
                        [--stitch file.jpg|png|tif|heic] [--projection automatic|flat|rectilinear|cylindrical|spherical]
                        [--scale 0.5] [--original-pixels] [--exposure channels|blocks|none] [--crop|--no-crop] [--out dir]
                        [--save-report file.json] [--exact] [--stages] images...
+           stitchbench [options] [--frames dir] video.mov   (its sharpest frames, a third of a frame apart)
            stitchbench --load-report file.json [--mode ...] [--align] [--stitch file] ...
            stitchbench --download-models [images...]
     """)
@@ -95,6 +98,7 @@ func parse() -> Options {
         case "--extractor-precision": options.configuration.extractorPrecision = precision(value(argument))
         case "--sift-mp": options.configuration.siftMegapixels = number(argument, minimum: 0.01)
         case "--all-pairs": options.configuration.pairSelection = .all
+        case "--frames": options.frames = URL(fileURLWithPath: value(argument), isDirectory: true)
         case "--low-memory": options.configuration.lightGlueLowMemory = true
         case "--onnx-select": options.configuration.nativeKeypointSelection = false
         case "--repeat": options.repeats = number(argument, minimum: 1)
@@ -125,7 +129,8 @@ func parse() -> Options {
         }
     }
     // --download-models alone only installs the models.
-    if options.files.count < 2, !(options.downloadModels && options.files.isEmpty), options.loadReport == nil {
+    let video = options.files.count == 1 && VideoFrames.isVideo(options.files[0])
+    if options.files.count < 2, !video, !(options.downloadModels && options.files.isEmpty), options.loadReport == nil {
         usage("at least two images are needed")
     }
     return options
@@ -195,6 +200,16 @@ func run() async throws {
         if options.files.isEmpty { return }
     }
     resolveModels(&options)
+    if options.files.count == 1, VideoFrames.isVideo(options.files[0]) {
+        let start = ContinuousClock.now
+        options.files = try await VideoFrames.extract(video: options.files[0], into: options.frames) { event in
+            FileHandle.standardError.write(Data("\rframes \(event.completed)/\(event.total)   ".utf8))
+        }
+        FileHandle.standardError.write(Data("\r".utf8))
+        print("frames: \(options.files.count) chosen in \((ContinuousClock.now - start).formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow)))" +
+              (options.files.first.map { ", \($0.deletingLastPathComponent().path)" } ?? ""))
+        guard options.files.count >= 2 else { usage("the video gave fewer than two frames") }
+    }
     let engine = StitchEngine()
     var report: MatchReport?
     if let file = options.loadReport {

@@ -117,6 +117,7 @@ extension ProgressEvent {
     /// What the engine is doing, with the count when it has one.
     var label: String {
         let name = switch stage {
+        case "frames": String(localized: "Choosing video frames")
         case "sift": String(localized: "RootSIFT keypoints")
         case "lightglue-extract": String(localized: "RaCo-ALIKED keypoints")
         case "affinity": String(localized: "Choosing pairs")

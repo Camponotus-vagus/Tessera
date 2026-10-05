@@ -86,8 +86,9 @@ struct TesseraApp: App {
                     let analyze = CommandLine.arguments.contains("--analyze")
                     let stitch = CommandLine.arguments.contains("--stitch")
                     delegate.openFiles = { urls in
-                        session.add(urls)
-                        if stitch { session.stitch() } else if analyze { session.analyze() }
+                        session.add(urls) {
+                            if stitch { session.stitch() } else if analyze { session.analyze() }
+                        }
                     }
                     delegate.cancelModelDownload = { session.cancelModelDownload() }
                 }
