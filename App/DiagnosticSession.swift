@@ -199,10 +199,16 @@ final class DiagnosticSession {
             }
             do {
                 for video in videos {
-                    // Detached: the extraction reads and measures every frame on the calling thread.
-                    let frames = try await Task.detached(priority: .userInitiated) {
+                    // Detached: the extraction reads and measures every frame on the calling thread. A detached
+                    // task does not inherit cancellation, so Stop and a new session pass it on.
+                    let extraction = Task.detached(priority: .userInitiated) {
                         try await VideoFrames.extract(video: video) { relay.send($0) }
-                    }.value
+                    }
+                    let frames = try await withTaskCancellationHandler {
+                        try await extraction.value
+                    } onCancel: {
+                        extraction.cancel()
+                    }
                     try Task.checkCancellation()
                     guard generation == self.generation else { return }
                     addPhotos(frames)
