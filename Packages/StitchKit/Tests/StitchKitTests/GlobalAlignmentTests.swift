@@ -512,4 +512,23 @@ struct GlobalAlignmentTests {
             #expect(abs(m[1]) < 1e-3 && abs(m[4] - 1) < 1e-3 && abs(m[2] - 1000) < 0.1 && abs(m[5]) < 0.1, "row \(row): \(m)")
         }
     }
+
+    @Test("The parallax note needs an error that grows with the distance between the photos")
+    func parallaxNote() {
+        // 15 pairs of photos 100 to 1500 px apart along x.
+        let shifts = (1...15).map { Double($0) * 100 }
+        let pairs = shifts.enumerated().map { index, dx in
+            AlignmentProblem.Pair(a: 0, b: index + 1, points: [], sigmas: [], homography: [1, 0, -dx, 0, 1, 0, 0, 0, 1],
+                                  siftPoints: [], siftSigmas: [])
+        }
+        let problem = AlignmentProblem(images: photos(16), pairs: pairs, thresholds: Array(repeating: 3, count: 16))
+        // Parallax: about 1% of the distance.
+        #expect(Aligner.errorGrowsWithDistance(problem, pairRMS: shifts.map { 2 + $0 / 100 }))
+        // The same error everywhere, or one that grows by less than half: no note.
+        #expect(!Aligner.errorGrowsWithDistance(problem, pairRMS: Array(repeating: 12, count: 15)))
+        #expect(!Aligner.errorGrowsWithDistance(problem, pairRMS: shifts.map { 10 + $0 / 500 }))
+        // Too few pairs to tell.
+        let few = AlignmentProblem(images: photos(16), pairs: Array(pairs.prefix(9)), thresholds: Array(repeating: 3, count: 16))
+        #expect(!Aligner.errorGrowsWithDistance(few, pairRMS: shifts.prefix(9).map { 2 + $0 / 100 }))
+    }
 }

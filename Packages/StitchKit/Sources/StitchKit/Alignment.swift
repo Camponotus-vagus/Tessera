@@ -720,12 +720,39 @@ enum Aligner {
             if excess > 1 {
                 modelNotes.append(String(format: String(localized: "No model fits these photos closely: the alignment error is %.1f times the error allowed within each pair"),
                                          locale: .current, excess))
+                // Far beyond the pairs' own error, the model itself is wrong (tiles forced on a rotating
+                // camera), and its error grows with the distance as well.
+                if excess < 4, errorGrowsWithDistance(problem, pairRMS: alignment.pairRMS) {
+                    modelNotes.append(String(localized: "Probably parallax: the error grows with the distance between the photos, as when the subject is not flat and the camera moves. Shooting from further away reduces it."))
+                }
             }
         }
         return (alignment, problem, modelNotes, dropped, misplaced)
     }
 
     private static func median(_ values: [Double]) -> Double { values.sorted().dropFirst(values.count / 2).first ?? .infinity }
+
+    /// Whether the pairs whose photos are furthest apart leave a clearly larger error than the closest ones, as
+    /// parallax does: a camera that moves over a subject in relief sees the parts at different heights shift by
+    /// amounts that grow with the distance it moved, and no single plane joins them. On an insect drawer swept
+    /// with a phone the median error went from 9 px for pairs 500-1000 px apart to 17 px for pairs 2000-3000 px
+    /// apart, while radial distortion was ruled out. Compares the closest and the furthest third of at least 12
+    /// pairs; the distance is how far the pair's homography carries the centre of a from the centre of b.
+    static func errorGrowsWithDistance(_ problem: AlignmentProblem, pairRMS: [Double]) -> Bool {
+        guard pairRMS.count == problem.pairs.count, problem.pairs.count >= 12 else { return false }
+        let distances = problem.pairs.map { pair -> Double in
+            let a = problem.images[pair.a].pixelSize, b = problem.images[pair.b].pixelSize
+            guard let centre = PlaneGeometry.apply(PlaneGeometry.matrix(pair.homography),
+                                                   Double(a.width) / 2, Double(a.height) / 2) else { return .infinity }
+            return simd_distance(centre, SIMD2(Double(b.width) / 2, Double(b.height) / 2))
+        }
+        let order = problem.pairs.indices.filter { distances[$0].isFinite }.sorted { distances[$0] < distances[$1] }
+        let third = order.count / 3
+        guard third >= 4 else { return false }
+        let near = median(order.prefix(third).map { pairRMS[$0] })
+        let far = median(order.suffix(third).map { pairRMS[$0] })
+        return far >= 1.5 * near
+    }
 
     /// Beyond this stretch of a photo on the reference plane a homography is not trusted.
     static let overstretch = 4.0
