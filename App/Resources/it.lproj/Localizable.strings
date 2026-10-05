@@ -15,7 +15,7 @@
 
 /* Empty states and status */
 "No photos" = "Nessuna foto";
-"Drop the photos to join here, or a video swept over the subject, or import them." = "Trascina qui le foto da unire, o un video che percorre il soggetto, oppure importali.";
+"Drop the photos to join here, or a video swept over the subject, or import them." = "Trascina qui le foto da unire, o un video girato muovendo la fotocamera sul soggetto, oppure importali.";
 "Import Photos…" = "Importa foto…";
 "Needs a new analysis" = "Da rianalizzare";
 "Analysing…" = "Analisi in corso…";
