@@ -59,6 +59,7 @@ struct ContentView: View {
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button("Import", systemImage: "plus") { importing = true }
+                    .help("Add photos or a video")
             }
             ToolbarItem(placement: .principal) {
                 Picker("View", selection: $session.tab) {
@@ -75,11 +76,14 @@ struct ContentView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 if session.isBusy {
                     Button("Stop", systemImage: "stop.fill") { session.cancel() }
+                        .help("Stop (⌘.)")
                         .disabled(session.isStopping)
                 } else {
                     Button("Analyze", systemImage: "point.3.connected.trianglepath.dotted") { session.analyze() }
+                        .help("Find how the photos match (⌘R)")
                         .disabled(!session.canAnalyze)
                     Button("Stitch", systemImage: "rectangle.split.3x1") { session.stitch() }
+                        .help("Join the photos into a panorama (⇧⌘R)")
                         .disabled(!session.canStitch)
                 }
                 Menu("Export", systemImage: "square.and.arrow.up") {
@@ -88,8 +92,10 @@ struct ContentView: View {
                     Button("Export Report…") { exporting = true }
                         .disabled(session.report == nil)
                 }
+                .help("Export the panorama (⌘E) or the match report")
                 .disabled(session.panorama == nil && session.report == nil)
                 Button("Settings", systemImage: "sidebar.trailing") { showInspector.toggle() }
+                    .help("Show or hide the settings")
             }
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.image, .movie], allowsMultipleSelection: true) { result in

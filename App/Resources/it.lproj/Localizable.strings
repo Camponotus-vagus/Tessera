@@ -11,6 +11,12 @@
 "Graph" = "Grafo";
 "Pair" = "Coppia";
 "Settings" = "Impostazioni";
+"Add photos or a video" = "Aggiungi foto o un video";
+"Stop (⌘.)" = "Interrompi (⌘.)";
+"Find how the photos match (⌘R)" = "Trova come combaciano le foto (⌘R)";
+"Join the photos into a panorama (⇧⌘R)" = "Unisci le foto in un panorama (⇧⌘R)";
+"Export the panorama (⌘E) or the match report" = "Esporta il panorama (⌘E) o il report delle corrispondenze";
+"Show or hide the settings" = "Mostra o nascondi le impostazioni";
 "Error" = "Errore";
 
 /* Empty states and status */
