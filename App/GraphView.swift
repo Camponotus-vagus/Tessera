@@ -76,6 +76,21 @@ private struct ViewMapping {
     }
 }
 
+/// The geometric layout and the evidence of the report last drawn. A class, so that filling it while the
+/// body runs does not count as a change of state; a report is identified by its creation date, as elsewhere.
+private final class LayoutCache {
+    private var key: (createdAt: Date, filter: EvidenceFilter)?
+    private var value: (placement: NodePlacement, edges: [PairEvidence])?
+
+    func layout(_ report: MatchReport, filter: EvidenceFilter) -> (placement: NodePlacement, edges: [PairEvidence]) {
+        if let key, let value, key.createdAt == report.createdAt, key.filter == filter { return value }
+        let fresh = (placement: GraphLayout.geometric(report, filter: filter), edges: report.evidence(filter: filter))
+        key = (report.createdAt, filter)
+        value = fresh
+        return fresh
+    }
+}
+
 private struct GraphCanvas: View {
     @Environment(DiagnosticSession.self) private var session
     let report: MatchReport
@@ -84,10 +99,13 @@ private struct GraphCanvas: View {
     let showRejected: Bool
     let showFailed: Bool
     @Binding var hovered: PairID?
+    @State private var cache = LayoutCache()
 
     var body: some View {
-        let placement = GraphLayout.geometric(report, filter: filter)
-        let edges = report.evidence(filter: filter)
+        // The body runs again whenever `hovered` changes, that is on most mouse moves over the graph, so the
+        // layout and the edges are kept until the report or the filter change instead of being rebuilt.
+        let layout = cache.layout(report, filter: filter)
+        let placement = layout.placement, edges = layout.edges
         let maxInliers = max(edges.map(\.inlierCount).max() ?? 1, 1)
         GeometryReader { geometry in
             let map = ViewMapping(placement: placement, size: geometry.size)
@@ -144,11 +162,10 @@ private struct GraphCanvas: View {
     }
 
     private func helpText(for id: PairID) -> String {
-        guard let pair = edgesForHelp.first(where: { PairID($0.a, $0.b) == id }) else { return "" }
+        guard let pair = cache.layout(report, filter: filter).edges.first(where: { PairID($0.a, $0.b) == id })
+        else { return "" }
         return String(localized: "\(session.name(of: pair.a)) ↔ \(session.name(of: pair.b)): \(pair.inlierCount) inliers of \(pair.matches.count) matches, \(pair.verdict.label). Click to open.")
     }
-
-    private var edgesForHelp: [PairEvidence] { report.evidence(filter: filter) }
 
     // MARK: Drawing
 
