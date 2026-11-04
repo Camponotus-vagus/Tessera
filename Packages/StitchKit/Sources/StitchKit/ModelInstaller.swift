@@ -230,7 +230,7 @@ public struct ModelInstaller: Sendable {
     private func download(_ url: URL, to file: URL, expected: Int64?,
                           progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
         -> (size: Int64, sha256: String) {
-        let delegate = DownloadDelegate(target: file, expected: expected, progress: progress)
+        let delegate = DownloadDelegate(target: file, expected: expected, limit: expected, progress: progress)
         let session = URLSession(configuration: sessionConfiguration(), delegate: delegate, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         // A data task, not a download task: the bytes go straight into the work folder, so nothing is left
@@ -335,6 +335,9 @@ private final class DownloadDelegate: NSObject, URLSessionDataDelegate, @uncheck
 
     private let target: URL
     private let fallbackExpected: Int64?
+    /// The archive's size from the manifest. A body longer than that cannot match the checksum, so the
+    /// download stops there instead of letting a broken or hostile server fill the disk before the check.
+    private let limit: Int64?
     private let progress: @Sendable (ModelInstallProgress) -> Void
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Outcome, any Error>?
@@ -349,9 +352,11 @@ private final class DownloadDelegate: NSObject, URLSessionDataDelegate, @uncheck
     /// Why the delegate stopped the task itself: an error status, or a write that failed.
     private var failure: ModelInstallError?
 
-    init(target: URL, expected: Int64?, progress: @escaping @Sendable (ModelInstallProgress) -> Void) {
+    init(target: URL, expected: Int64?, limit: Int64?,
+         progress: @escaping @Sendable (ModelInstallProgress) -> Void) {
         self.target = target
         fallbackExpected = expected
+        self.limit = limit
         self.progress = progress
     }
 
@@ -375,6 +380,11 @@ private final class DownloadDelegate: NSObject, URLSessionDataDelegate, @uncheck
             completionHandler(.cancel)
             return
         }
+        if let limit, response.expectedContentLength > limit {
+            failure = .checksumMismatch
+            completionHandler(.cancel)
+            return
+        }
         let manager = FileManager.default
         try? manager.removeItem(at: target)
         guard manager.createFile(atPath: target.path, contents: nil),
@@ -390,6 +400,11 @@ private final class DownloadDelegate: NSObject, URLSessionDataDelegate, @uncheck
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard let file, failure == nil else { return }
+        if let limit, received + Int64(data.count) > limit {
+            failure = .checksumMismatch
+            dataTask.cancel()
+            return
+        }
         do {
             try file.write(contentsOf: data)
         } catch {

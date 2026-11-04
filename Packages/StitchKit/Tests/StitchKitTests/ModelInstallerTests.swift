@@ -237,6 +237,21 @@ struct ModelInstallerTests {
         #expect(Self.temporaryDownloads().subtracting(before).isEmpty)
     }
 
+    @Test("A body longer than the size in the manifest is cut off and discarded", arguments: [true, false])
+    func oversizedArchive(announced: Bool) async throws {
+        let sandbox = try Sandbox()
+        defer { sandbox.remove() }
+        let local = try sandbox.archive()
+        let data = try Data(contentsOf: local.url)
+        var manifest = local
+        manifest.url = FakeServer.url(answering: .archive(data, announced: announced))
+        manifest.size = Int64(data.count) - 1
+        await #expect(throws: ModelInstallError.checksumMismatch) {
+            try await sandbox.installer(manifest).install()
+        }
+        #expect(sandbox.supportContents.isEmpty)
+    }
+
     @Test("An error status fails before any of the body arrives, with the status in the message",
           arguments: [404, 500])
     func errorStatus(_ status: Int) async throws {
